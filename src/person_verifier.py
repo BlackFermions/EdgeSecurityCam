@@ -23,8 +23,12 @@ SUB_STREAM_PATH = "/stream2"
 @dataclass(frozen=True)
 class FrameResult:
     at: float                                       # time.monotonic()
-    confidences: tuple[float, ...]
+    confidences: tuple[float, ...]                  # detecciones fuertes
     boxes: tuple[tuple[int, int, int, int], ...]
+    # Detecciones débiles: solo mantienen viva una trayectoria existente;
+    # nunca crean personas ni cuentan para el veredicto (idea de ByteTrack).
+    weak_confidences: tuple[float, ...] = ()
+    weak_boxes: tuple[tuple[int, int, int, int], ...] = ()
 
     @property
     def people(self) -> int:
@@ -97,11 +101,13 @@ class PersonDetector:
     """YOLO restringido a la clase persona; se carga y precalienta una vez."""
 
     def __init__(self, model: str, confidence: float = 0.40,
-                 image_size: int = 640, device: str = "cpu") -> None:
+                 image_size: int = 640, device: str = "cpu",
+                 weak_confidence: float = 0.15) -> None:
         from ultralytics import YOLO  # import diferido: es pesado
 
         self._model = YOLO(model)
         self._confidence = confidence
+        self._weak_confidence = min(weak_confidence, confidence)
         self._image_size = image_size
         self._device = device
         self._lock = threading.Lock()
@@ -110,16 +116,19 @@ class PersonDetector:
     def detect(self, frame: np.ndarray) -> FrameResult:
         with self._lock:
             prediction = self._model.predict(
-                frame, conf=self._confidence, imgsz=self._image_size,
+                frame, conf=self._weak_confidence, imgsz=self._image_size,
                 classes=[PERSON_CLASS], device=self._device, verbose=False,
             )[0]
-        confidences: list[float] = []
-        boxes: list[tuple[int, int, int, int]] = []
+        strong: list[tuple[float, tuple[int, int, int, int]]] = []
+        weak: list[tuple[float, tuple[int, int, int, int]]] = []
         for box in prediction.boxes:
-            confidences.append(float(box.conf[0].item()))
+            confidence = float(box.conf[0].item())
             x1, y1, x2, y2 = (int(value) for value in box.xyxy[0].tolist())
-            boxes.append((x1, y1, x2, y2))
-        return FrameResult(time.monotonic(), tuple(confidences), tuple(boxes))
+            (strong if confidence >= self._confidence else weak).append(
+                (confidence, (x1, y1, x2, y2)))
+        return FrameResult(time.monotonic(),
+                           tuple(c for c, _ in strong), tuple(b for _, b in strong),
+                           tuple(c for c, _ in weak), tuple(b for _, b in weak))
 
 
 def rtsp_url(host: str, username: str, password: str, port: int = 554,

@@ -64,6 +64,11 @@ class SafetyRuleTests(unittest.TestCase):
         self.assertIsNone(decide(last_yolo=7.5))
         self.assertEqual(decide(last_yolo=7.0), REASON_INTERVAL)
 
+    def test_hidden_people_are_searched_slowly(self):
+        self.assertIsNone(decide(has_tracks=False, searching=True, last_yolo=8.0))
+        self.assertEqual(decide(has_tracks=False, searching=True, last_yolo=7.0),
+                         REASON_WATCH)
+
     def test_alarm_without_tracks_keeps_watching(self):
         self.assertEqual(decide(has_tracks=False, alarm_active=True, last_yolo=9.0),
                          REASON_WATCH)
@@ -90,12 +95,110 @@ class TrackManagerTests(unittest.TestCase):
         self.assertEqual(self.manager.tracks[0].id, first[0].id)
         self.assertEqual(self.manager.tracks[0].yolo_hits, 2)
 
-    def test_track_ends_after_misses_and_time(self):
+    def test_unseen_track_goes_to_grace_then_ends(self):
         self.apply([(0, 0, 100, 200)], 0.0)
         self.assertEqual(self.apply([], 1.0), ([], []))
-        _, ended = self.apply([], 2.5)
+        self.assertEqual(self.apply([], 2.5), ([], []))
+        self.assertEqual((len(self.manager.tracks), len(self.manager.grace)), (0, 1))
+        _, ended = self.apply([], 10.5)
         self.assertEqual(len(ended), 1)
-        self.assertEqual(self.manager.tracks, [])
+        self.assertEqual(self.manager.grace, [])
+
+    # Casos del registro del 2026-10-06 15:52-15:53: la misma persona recibió
+    # tres códigos.
+    def test_fast_move_without_overlap_keeps_code(self):
+        first, _ = self.apply([(100, 50, 200, 250)], 0.0)
+        # La caja del flujo quedó atrás: la nueva detección no se superpone.
+        created, _ = self.apply([(205, 60, 305, 260)], 1.0, REASON_MOTION)
+        self.assertEqual(created, [])
+        self.assertEqual(self.manager.tracks[0].code, first[0].code)
+
+    def test_far_detection_is_a_new_person(self):
+        self.apply([(0, 0, 100, 200)], 0.0)
+        created, _ = self.apply([(0, 0, 100, 200), (400, 0, 500, 200)], 1.0)
+        self.assertEqual(len(created), 1)
+
+    def test_weak_detection_keeps_track_alive_but_never_creates(self):
+        first, _ = self.apply([(0, 0, 100, 200)], 0.0)
+        for now in (1.0, 2.5, 4.0):
+            created, ended = self.manager.apply_detections(
+                None, [], [], now, WALL, REASON_INTERVAL, None,
+                [(5, 0, 105, 200), (400, 0, 500, 200)], [0.3, 0.3])
+            self.assertEqual((created, ended), ([], []))
+        self.assertEqual([t.code for t in self.manager.tracks], [first[0].code])
+        self.assertEqual(self.manager.grace, [])
+
+    def test_lost_in_center_is_hidden_not_gone(self):
+        self.manager.frame_size = (640, 360)
+        first, _ = self.apply([(250, 100, 350, 300)], 0.0)       # centro
+        self.apply([], 1.0)
+        self.apply([], 2.5)
+        self.assertEqual([t.code for t in self.manager.hidden()], [first[0].code])
+        self.assertEqual(self.apply([], 30.0), ([], []))          # sigue esperando
+        _, ended = self.apply([], 121.0)
+        self.assertEqual(ended[0].exit_kind, "interior")
+
+    def test_walking_out_at_edge_leaves_after_grace(self):
+        self.manager.frame_size = (640, 360)
+        for step, x in enumerate((440, 480, 520, 560)):           # camina a la derecha
+            self.apply([(x, 100, x + 80, 300)], step * 0.4)
+        self.apply([], 2.0)
+        self.apply([], 3.5)
+        self.assertEqual(self.manager.hidden(), [])
+        _, ended = self.apply([], 11.5)
+        self.assertEqual(ended[0].exit_kind, "borde")
+
+    def test_still_person_at_edge_is_hidden_not_gone(self):
+        # 2026-10-06 16:20-16:21: sentado en la zona oscura junto al borde.
+        self.manager.frame_size = (640, 360)
+        self.apply([(0, 120, 90, 330)], 0.0)
+        self.apply([(1, 121, 91, 331)], 1.0)
+        self.apply([], 2.0)
+        self.apply([], 3.5)
+        self.assertEqual(len(self.manager.hidden()), 1)
+        self.assertEqual(self.apply([], 30.0), ([], []))
+
+    def test_interior_detection_continues_lost_person(self):
+        # 2026-10-06 16:21:27: la detección no encajó y se creó otro código.
+        self.manager.frame_size = (640, 360)
+        first, _ = self.apply([(20, 120, 110, 330)], 0.0)
+        created, _ = self.apply([(250, 100, 340, 320)], 1.0, REASON_INTERVAL)
+        self.assertEqual(created, [])
+        self.assertEqual([t.code for t in self.manager.tracks], [first[0].code])
+        self.assertEqual(self.manager.last_recovered[0][1], "continuidad")
+
+    def test_partial_entry_then_full_body_is_one_person(self):
+        # 2026-10-06 16:20:20-21: caja parcial en el borde y luego cuerpo completo.
+        self.manager.frame_size = (640, 360)
+        first, _ = self.apply([(0, 100, 40, 300)], 0.0)
+        created, _ = self.apply([(60, 80, 160, 330)], 1.0, REASON_MOTION)
+        self.assertEqual(created, [])
+        self.assertEqual(self.manager.tracks[0].code, first[0].code)
+
+    def test_new_person_entering_by_edge_is_new(self):
+        self.manager.frame_size = (640, 360)
+        self.apply([(250, 100, 340, 320)], 0.0)
+        created, _ = self.apply([(250, 100, 340, 320), (590, 100, 640, 320)], 1.0,
+                                REASON_MOTION)
+        self.assertEqual(len(created), 1)
+
+    def test_hidden_person_recovers_code(self):
+        self.manager.frame_size = (640, 360)
+        first, _ = self.apply([(250, 100, 350, 300)], 0.0)
+        self.apply([], 1.0)
+        self.apply([], 2.5)
+        created, _ = self.apply([(260, 110, 360, 310)], 60.0, REASON_WATCH)
+        self.assertEqual(created, [])
+        self.assertEqual(self.manager.tracks[0].code, first[0].code)
+        self.assertIsNone(self.manager.tracks[0].exit_kind)
+
+    def test_reappearing_person_recovers_code_from_grace(self):
+        first, _ = self.apply([(0, 0, 100, 200)], 0.0)
+        self.apply([], 1.0)
+        self.apply([], 2.5)                       # pasa a gracia
+        created, ended = self.apply([(10, 0, 110, 200)], 5.0, REASON_WATCH)
+        self.assertEqual((created, ended), ([], []))
+        self.assertEqual(self.manager.tracks[0].code, first[0].code)
 
     def test_new_person_gets_new_track_with_reason(self):
         self.apply([(0, 0, 100, 200)], 0.0)

@@ -80,6 +80,13 @@ class NodeTests(unittest.TestCase):
         self.assertIsNotNone(row["fin"])
         self.assertIn("interpretación", row["nota"])
 
+    def test_alarms_during_shutdown_are_ignored(self):
+        self.node._on_config(CAM, config(motion_enable=0))
+        self.node._closing = True
+        self.node._on_alarm(alarm(True, T0))
+        self.assertEqual(self.store.query("SELECT id FROM alarma"), [])
+        self.assertEqual(self.verifier.started, [])
+
     def test_disconnect_closes_open_alarm(self):
         self.node._on_config(CAM, config(motion_enable=0))
         self.node._on_alarm(alarm(True, T0))

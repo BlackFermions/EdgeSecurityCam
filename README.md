@@ -40,6 +40,9 @@ alarmas y la base no necesitan dependencias: `python escuchar_alarmas.py --no-yo
 .\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109 --raw   # cada evento
 .\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109 --no-yolo
 
+# Ventana con el vídeo analizado en tiempo real (q o Esc para cerrar)
+.\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109 --ver
+
 # Resumen de la base para calibrar
 .\.venv\Scripts\python tools\resumen.py
 .\.venv\Scripts\python tools\resumen.py --desde 2026-10-06T20:00 --ultimas 30
@@ -47,6 +50,24 @@ alarmas y la base no necesitan dependencias: `python escuchar_alarmas.py --no-yo
 # Diagnóstico de la cámara: servicios ONVIF, temas, eventos y configuración
 .\.venv\Scripts\python tools\sondear_eventos.py 192.168.100.109 --seconds 60
 ```
+
+Con `--ver` se abre una ventana por cámara (también `.\ejecutar.bat 192.168.100.109 --ver`):
+
+- **verde:** posición puesta por YOLO en ese fotograma;
+- **celeste:** posición estimada con flujo óptico (sin YOLO);
+- **rojo:** el flujo óptico la perdió; marco rojo: movimiento nuevo fuera de las personas;
+- **gris fino:** en gracia: `oculta` (perdida en el interior) o `saliendo` (junto a un borde);
+- abajo, el motivo por el que se ejecutó YOLO; arriba, fotogramas, inferencias
+  y porcentaje sin YOLO;
+- en reposo muestra la cámara en vivo con el aviso "REPOSO: YOLO dormido".
+
+Para ver la cámara en reposo, la ventana abre **su propia conexión RTSP**
+(solo con `--ver`): el análisis sigue sin abrir el vídeo hasta que la cámara
+avisa, igual que sin ventana. Sirve para comprobar a simple vista si la
+cámara deja de avisar con alguien en la imagen (p. ej. en zonas oscuras).
+
+Necesita escritorio (no funciona en un servidor sin pantalla) y consume más
+CPU (decodificar el vídeo continuo y dibujar); es para depurar y calibrar.
 
 Sin `--camera`, busca la cámara por su MAC con ONVIF. Varias cámaras se indican
 repitiendo `--camera`. Otras opciones: `--db`, `--no-db`, `--config-interval`,
@@ -103,14 +124,51 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
      aparece después);
    - **sin_video:** no se pudo abrir el vídeo;
    - aunque la alarma dure 1–2 s, se analiza hasta tener veredicto.
-6. **Seguimiento corporal:** YOLO crea las trayectorias y corrige su posición;
-   entre dos inferencias cada persona se sigue con **flujo óptico
-   Lucas-Kanade** a media resolución (sin redes neuronales, unos pocos ms por
-   persona). Cada aparición recibe un código legible
+6. **Seguimiento corporal (algoritmos clásicos, sin redes neuronales):** YOLO
+   crea las trayectorias y corrige su posición; entre dos inferencias:
+   - **flujo óptico Lucas-Kanade** a media resolución mueve y **escala** cada
+     caja (se agranda o achica cuando la persona se acerca o se aleja);
+   - un **filtro de Kalman** de velocidad constante combina el flujo (ruidoso)
+     con YOLO (preciso) y **predice dónde está** quien dejó de verse;
+   - la **asignación húngara** reparte detecciones y personas de forma óptima;
+   - un **histograma de color del torso** (0,14 ms por persona) impide
+     intercambiar personas con ropa distinta y recupera a quien reaparece en
+     otro sitio. Con IR u oscuridad no hay color y solo cuenta la posición.
+
+    Cada aparición recibe un código legible
    `cam109-AAAAMMDD-HHMMSS-n` (cámara, fecha y hora de aparición, subnúmero si
-   aparecen varias en el mismo segundo) y un UUID. Una persona se da por
-   terminada si YOLO deja de verla 2 veces seguidas y al menos 2 s.
-7. **Salvaguardas.** El ahorro solo aplica a seguir a quien ya fue detectado;
+   aparecen varias en el mismo segundo) y un UUID. Para no cambiar el código
+   de una misma persona (*ID switch*) se usan las ideas de ByteTrack:
+   - **asociación por superposición o cercanía:** si el flujo óptico se quedó
+     atrás y la caja ya no se superpone, una detección cercana sigue siendo la
+     misma persona;
+   - **detecciones débiles** (confianza 0,15–0,40): mantienen viva una
+     trayectoria existente, pero nunca crean personas ni confirman alarmas;
+   - **gracia:** quien deja de verse no se da por ido de inmediato; si
+     reaparece cerca de donde Kalman lo esperaba (el radio crece con el tiempo
+     hasta 1,25 tamaños de caja) recupera su código **por posición**; si
+     estaba oculto en el interior y reaparece lejos, lo recupera **por
+     apariencia** solo si la ropa es muy parecida (≥ 0,80) y sin otra
+     candidata similar;
+   - **cruces:** si hay varias personas, la ropa claramente distinta
+     (similitud < 0,30) impide intercambiar sus códigos, salvo superposición
+     muy alta. Con una sola persona el color no veta nada: un torso parcial o
+     en sombra cambia de color sin cambiar de persona;
+   - **continuidad:** las personas nuevas entran por los bordes. Una
+     detección que aparece **en el interior** habiendo alguien perdido o sin
+     pareja es esa misma persona (salvo ropa claramente distinta); solo una
+     detección junto a un borde puede ser alguien que entra.
+7. **Salir o desaparecer.** Nadie desaparece de una casa: solo se sale por un
+   borde de la imagen, moviéndose hacia él. Si YOLO deja de ver a alguien
+   (2 inferencias y 2 s):
+
+   | Última situación | Estado | Si no reaparece |
+   |---|---|---|
+   | Junto a un borde (8% del ancho/alto) **y moviéndose hacia él** (≥ 20 px/s, según Kalman) | saliendo | a los 10 s: **salió por el borde** |
+   | En el interior, **o quieta junto a un borde** | **oculta** (mueble, zona oscura, agachada, falla) | se la busca con YOLO cada 3 s; a los 2 min: **DESAPARECIÓ**, anomalía a revisar |
+
+   Mientras haya personas en gracia u ocultas la sesión sigue abierta.
+8. **Salvaguardas.** El ahorro solo aplica a seguir a quien ya fue detectado;
    detectar lo nuevo nunca se retrasa más de ~0,5 s. YOLO se ejecuta si:
 
    | Motivo | Cuándo |
@@ -120,12 +178,12 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
    | `movimiento_nuevo` | la diferencia de fotogramas muestra cambios fuera de las personas seguidas (máx. 1 cada 0,5 s; el aviso queda retenido hasta que YOLO corra) |
    | `trayectoria_perdida` | el flujo óptico pierde a alguien, p. ej. en zonas oscuras (máx. 1 cada 0,5 s) |
    | `intervalo` | 1 s sin YOLO con personas en movimiento, 3 s si están quietas |
-   | `vigilancia` | alarma activa sin personas seguidas (1 por segundo) |
+   | `vigilancia` | alarma activa sin personas seguidas (1 por segundo) o personas ocultas/saliendo por encontrar (cada 3 s) |
 
    La base registra cuántas inferencias hubo por motivo y **por qué motivo se
    detectó cada persona**. Si aparecen personas nuevas detectadas por
    `intervalo`, la puerta de movimiento no las vio a tiempo y hay que ajustarla.
-8. **Base local:** alarmas, veredictos, personas seguidas y estadísticas de
+9. **Base local:** alarmas, veredictos, personas seguidas y estadísticas de
    cada sesión, con la versión de configuración vigente.
 
 ### Consumo medido (PC de pruebas, 8 núcleos, CPU, sin GPU)
@@ -151,14 +209,14 @@ ONNX y quitar PyTorch es la siguiente optimización.
 `escuchar_alarmas.py` define `KMP_BLOCKTIME=0` y `OMP_WAIT_POLICY=PASSIVE`: sin
 ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
 
-## Base de datos del nodo (`data/camdetector.db`, esquema v2)
+## Base de datos del nodo (`data/camdetector.db`, esquema v3)
 
 | Tabla | Una fila por | Contenido |
 |---|---|---|
 | `config_camara` | versión de configuración de una cámara | `vigente_desde`/`vigente_hasta`, Human/Motion Detect (activo, sensibilidad, duración), modelo, firmware, parámetros de IA y seguimiento, configuración completa en JSON (`datos`) |
 | `alarma` | alarma de la cámara | UUID, cámara, `config_id`, tipo, inicio, fin, duración, veredicto, máximo de personas, confianza, fotogramas, segundos hasta la primera persona, foto, nota |
-| `persona_track` | aparición de una persona | UUID, `codigo` legible, cámara, alarma y sesión, entrada, última vista, salida, segundos visible, confianza máxima, detecciones YOLO, `motivo_deteccion`, nota |
-| `sesion_analisis` | sesión de análisis | inicio, fin, fotogramas, inferencias YOLO, ahorro, inferencias y personas nuevas por motivo (JSON) |
+| `persona_track` | aparición de una persona | UUID, `codigo` legible, cámara, alarma y sesión, entrada, última vista, salida, segundos visible, confianza máxima, detecciones YOLO, `motivo_deteccion`, `recuperaciones` y `recuperaciones_apariencia`, nota (salió por el borde / DESAPARECIÓ en el centro / sesión terminada) |
+| `sesion_analisis` | sesión de análisis | inicio, fin, fotogramas, inferencias YOLO, ahorro, inferencias y personas nuevas por motivo, reapariciones por método (JSON) |
 | `evento_sistema` | evento del nodo | inicio, fin, conexión, desconexión, cambios de configuración, errores |
 
 - Horas en UTC (ISO 8601); `tools/resumen.py` las muestra en hora local.
@@ -166,7 +224,7 @@ ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
   actualización de la fila la vuelve a marcar como pendiente (patrón outbox).
 - Los identificadores son UUID generados en el nodo: el NOC podrá descartar
   reenvíos duplicados.
-- Una base v1 se actualiza sola a v2 al arrancar (se añaden las tablas nuevas).
+- Una base anterior se actualiza sola al arrancar (tablas y columnas nuevas).
 - El código de una persona identifica **una aparición**, no a la persona: si
   sale y vuelve a entrar recibe otro código. Unir apariciones es trabajo de
   Re-ID y del reconocimiento facial (siguientes etapas).
@@ -196,6 +254,11 @@ ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
 | Persona de frente / lado / espaldas | Alarmas y confirmaciones de YOLO por orientación |
 | Persona quieta / sentada | ¿La alarma se mantiene o se corta? ¿El seguimiento la conserva? |
 | Dos personas que se cruzan | ¿Se mantienen sus códigos o se intercambian? |
+| Persona que se mueve rápido o se agacha | ¿Conserva su código? (antes cambiaba: 3 códigos en 2 min) |
+| Persona en la zona oscura | ¿Queda `oculta` y recupera su código al volver a verse? |
+| Caminar detrás de un mueble y salir por otro lado | ¿Reaparece con su código (por posición o por apariencia)? |
+| Sentarse junto al borde, en la zona oscura | ¿Queda oculta y conserva su código, sin "salió por el borde"? |
+| Entrar por el borde (cuerpo parcial → completo) | ¿Un solo código desde la entrada? |
 | Entrada mientras ya hay alguien | ¿Se detecta por `movimiento_nuevo` y con qué retraso? |
 | Objetos, cortinas, cambios de luz | Falsas alarmas de la cámara y cuántas descarta YOLO |
 | Noche con IR y zonas oscuras | Detección, falsas alarmas y trayectorias perdidas |

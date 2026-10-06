@@ -41,6 +41,7 @@ class CamDetectorNode:
         self.verifier = verifier
         self.base_dir = base_dir
         self._lock = threading.Lock()
+        self._closing = False
         self._tracker = AlarmStateTracker()
         self._open_alarms: dict[tuple[str, str], str] = {}
         self._configs: dict[str, dict[str, Any]] = {}
@@ -75,6 +76,9 @@ class CamDetectorNode:
         log.info("Escuchando %d cámara(s). Ctrl+C para salir.", len(self.hosts))
 
     def close(self) -> None:
+        # Las alarmas que llegan durante el apagado ya no se pueden verificar:
+        # se ignoran para no dejar registros "sin vídeo" falsos.
+        self._closing = True
         for watcher in self.watchers.values():
             watcher.request_stop()
         for listener in self.listeners:
@@ -140,6 +144,8 @@ class CamDetectorNode:
                   alarm.topic, alarm.active, alarm.items)
 
     def _on_alarm(self, alarm: CameraAlarm) -> None:
+        if self._closing:
+            return
         with self._lock:
             self._log_raw(alarm)
             transition = self._tracker.update(alarm)
@@ -232,23 +238,40 @@ class CamDetectorNode:
     # --- seguimiento corporal --------------------------------------------------
 
     def _on_track(self, event: str, track, note: str | None) -> None:
+        if event == "recovered":
+            how, unseen = (note or "posicion:0").split(":")
+            log.info("[%s]     persona %s reapareció tras %s s sin verse (por %s)",
+                     track.camera, track.code, unseen, how.replace("posicion", "posición"))
+            if self.store is not None:
+                self.store.track_recovered(track)
+            return
         if event == "entered":
             log.info("[%s]     persona %s entró (confianza %.2f · YOLO por %s)",
                      track.camera, track.code, track.confidence, track.reason)
             if self.store is not None:
                 self.store.track_entered(track)
             return
-        log.info("[%s]     persona %s salió (%.1f s visible · %d detecciones YOLO%s)",
-                 track.camera, track.code, track.visible_seconds, track.yolo_hits,
-                 f" · {note}" if note else "")
+        description = {
+            "borde": "salió por el borde",
+            "interior": "DESAPARECIÓ en el centro de la imagen (oclusión, zona "
+                        "oscura o falla de cámara)",
+        }.get(track.exit_kind, "dejó de seguirse")
+        if note:                      # la sesión terminó con la persona presente
+            description = f"dejó de seguirse: {note}"
+        else:
+            note = description
+        log.info("[%s]     persona %s %s (%.1f s visible · %d detecciones YOLO)",
+                 track.camera, track.code, description, track.visible_seconds,
+                 track.yolo_hits)
         if self.store is not None:
             self.store.track_left(track, note)
 
     def _on_session(self, stats) -> None:
         reasons = ", ".join(f"{name} {count}" for name, count in stats.reasons.most_common())
         log.info("[%s]     sesión: %d fotogramas · %d YOLO (%.0f%% sin YOLO) · "
-                 "%d persona(s) seguida(s) · motivos: %s", stats.camera, stats.frames,
-                 stats.yolo_runs, stats.savings * 100, stats.tracks, reasons or "-")
+                 "%d persona(s) seguida(s) · %d reaparición(es) · motivos: %s",
+                 stats.camera, stats.frames, stats.yolo_runs, stats.savings * 100,
+                 stats.tracks, sum(stats.recoveries.values()), reasons or "-")
         if self.store is not None:
             self.store.session_finished(stats)
 

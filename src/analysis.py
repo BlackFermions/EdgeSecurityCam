@@ -33,6 +33,7 @@ from src.person_verifier import (
     annotate,
 )
 from src.tracking import FLOW_SCALE, MotionGate, PersonTrack, TrackManager, yolo_reason
+from src.viewer import draw_overlay
 
 
 PROCESS_INTERVAL = 0.1          # ~10 fotogramas por segundo para flujo y puerta
@@ -48,6 +49,7 @@ class SessionStats:
     yolo_runs: int = 0
     reasons: Counter = field(default_factory=Counter)
     new_by_reason: Counter = field(default_factory=Counter)
+    recoveries: Counter = field(default_factory=Counter)    # posicion / apariencia
     tracks: int = 0
     max_people: int = 0
     error: str | None = None
@@ -69,7 +71,8 @@ class SessionCallbacks:
 class AnalysisSession(threading.Thread):
     def __init__(self, camera: str, url: str, detector: PersonDetector,
                  callbacks: SessionCallbacks, snapshot_dir: Path | None,
-                 alarm_id: str | None, max_seconds: float = 900.0) -> None:
+                 alarm_id: str | None, max_seconds: float = 900.0,
+                 viewer=None) -> None:
         super().__init__(name=f"analisis-{camera}", daemon=True)
         self.camera = camera
         self._url = url
@@ -77,6 +80,7 @@ class AnalysisSession(threading.Thread):
         self._cb = callbacks
         self._snapshot_dir = snapshot_dir
         self._max_seconds = max_seconds
+        self._viewer = viewer
         self._halt = threading.Event()
         self._lock = threading.Lock()
         self._pending_alarms: list[str | None] = [alarm_id]
@@ -196,23 +200,27 @@ class AnalysisSession(threading.Thread):
                     continue
                 last_id = frame_id
                 self.stats.frames += 1
+                if tracks.frame_size is None:
+                    tracks.frame_size = (frame.shape[1], frame.shape[0])
 
                 gray = cv2.cvtColor(cv2.resize(frame, None, fx=FLOW_SCALE, fy=FLOW_SCALE,
                                                interpolation=cv2.INTER_AREA),
                                     cv2.COLOR_BGR2GRAY)
                 lost, moving = False, False
                 if previous_gray is not None and tracks.tracks:
-                    lost, moving = tracks.flow_step(previous_gray, gray)
+                    lost, moving = tracks.flow_step(previous_gray, gray, now)
                 motion_outside, motion_inside = gate.update(
                     gray, [track.box for track in tracks.tracks])
                 motion_latched = motion_latched or motion_outside
                 lost_latched = lost_latched or lost
                 with self._lock:
                     alarm_active = self._alarm_active
+                verdict_pending = any(v.summary.verdict is None for v in verifications)
                 reason = yolo_reason(
                     now=now, last_yolo=last_yolo,
-                    verdict_pending=any(v.summary.verdict is None for v in verifications),
+                    verdict_pending=verdict_pending,
                     alarm_pending=alarm_pending, alarm_active=alarm_active,
+                    searching=bool(tracks.grace),
                     has_tracks=bool(tracks.tracks), motion_outside=motion_latched,
                     track_lost=lost_latched, tracks_moving=moving or motion_inside)
 
@@ -233,7 +241,12 @@ class AnalysisSession(threading.Thread):
                     created, ended = tracks.apply_detections(
                         gray, [tuple(map(float, box)) for box in result.boxes],
                         list(result.confidences), last_yolo, datetime.now(),
-                        reason, current_alarm)
+                        reason, current_alarm,
+                        [tuple(map(float, box)) for box in result.weak_boxes],
+                        list(result.weak_confidences), frame)
+                    for track, how, unseen in tracks.last_recovered:
+                        self.stats.recoveries[how] += 1
+                        self._cb.on_track("recovered", track, f"{how}:{unseen:.1f}")
                     for track in created:
                         track.session_id = self.stats.id
                         self.stats.tracks += 1
@@ -244,9 +257,15 @@ class AnalysisSession(threading.Thread):
                 else:
                     check_timeouts(now)
                 previous_gray = gray
+                if self._viewer is not None:
+                    self._viewer.publish(self.camera, draw_overlay(
+                        frame, tracks.tracks + tracks.grace, reason, motion_outside,
+                        self.stats,
+                        alarm_active, verdict_pending))
 
                 decided = all(v.summary.verdict is not None for v in verifications)
-                if not alarm_active and decided and not tracks.tracks:
+                if (not alarm_active and decided and not tracks.tracks
+                        and not tracks.grace):
                     with self._lock:
                         # Se cierra solo si no llegó otra alarma entretanto.
                         if not self._pending_alarms:
@@ -277,6 +296,8 @@ class AnalysisSession(threading.Thread):
         for track in tracks.close_all():
             self._cb.on_track("left", track, note)
         self.stats.ended_wall = datetime.now()
+        if self._viewer is not None:
+            self._viewer.idle(self.camera)
         self._cb.on_session(self.stats)
 
     def _save(self, frame: np.ndarray, result: FrameResult) -> Path | None:
@@ -300,8 +321,9 @@ class AnalysisManager:
     """Una sesión de análisis por cámara, iniciada y alimentada por las alarmas."""
 
     def __init__(self, detector: PersonDetector, urls: dict[str, str],
-                 snapshot_dir: Path | None) -> None:
+                 snapshot_dir: Path | None, viewer=None) -> None:
         self._detector = detector
+        self._viewer = viewer
         self._urls = urls
         self._snapshot_dir = snapshot_dir
         self._callbacks = SessionCallbacks()
@@ -321,7 +343,8 @@ class AnalysisManager:
                     and session.attach_alarm(alarm_id)):
                 return False
             session = AnalysisSession(camera, self._urls[camera], self._detector,
-                                      self._callbacks, self._snapshot_dir, alarm_id)
+                                      self._callbacks, self._snapshot_dir, alarm_id,
+                                      viewer=self._viewer)
             self._sessions[camera] = session
             session.start()
             return True

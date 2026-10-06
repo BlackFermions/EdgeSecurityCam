@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS config_camara (
@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS persona_track (
     max_confianza       REAL,
     detecciones_yolo    INTEGER,
     motivo_deteccion    TEXT,                   -- qué despertó a YOLO al aparecer
+    recuperaciones      INTEGER DEFAULT 0,      -- reapariciones tras dejar de verse
+    recuperaciones_apariencia INTEGER DEFAULT 0, -- de ellas, por color de la ropa
     nota                TEXT,
     actualizado         TEXT NOT NULL,
     enviado             TEXT
@@ -94,6 +96,7 @@ CREATE TABLE IF NOT EXISTS sesion_analisis (
     ahorro              REAL,                   -- fracción sin YOLO
     motivos             TEXT,                   -- JSON: inferencias por motivo
     nuevas_por_motivo   TEXT,                   -- JSON: personas nuevas por motivo
+    reapariciones       TEXT,                   -- JSON: reapariciones por método
     trayectorias        INTEGER,
     max_personas        INTEGER,
     error               TEXT,
@@ -136,7 +139,21 @@ class NodeStore:
         if version > SCHEMA_VERSION:
             raise RuntimeError(f"la base {path} es de una versión más nueva ({version})")
         self._db.executescript(SCHEMA)
+        self._migrate()
         self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _migrate(self) -> None:
+        """Añade a bases anteriores las columnas que CREATE TABLE no agrega."""
+        added = {
+            "persona_track": ("recuperaciones INTEGER DEFAULT 0",
+                              "recuperaciones_apariencia INTEGER DEFAULT 0"),
+            "sesion_analisis": ("reapariciones TEXT",),
+        }
+        for table, columns in added.items():
+            existing = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            for column in columns:
+                if column.split()[0] not in existing:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
 
     def close(self) -> None:
         with self._lock:
@@ -254,28 +271,40 @@ class NodeStore:
                  round(track.max_confidence, 4), track.yolo_hits, track.reason,
                  utc_iso()))
 
+    def track_recovered(self, track) -> None:
+        with self._lock:
+            self._db.execute(
+                """UPDATE persona_track SET recuperaciones=?, recuperaciones_apariencia=?,
+                       ultima_vista=?, actualizado=?, enviado=NULL WHERE id=?""",
+                (track.recoveries, track.recoveries_by_appearance,
+                 utc_iso(track.last_seen_wall), utc_iso(), track.id))
+
     def track_left(self, track, note: str | None = None) -> None:
         with self._lock:
             self._db.execute(
                 """UPDATE persona_track SET ultima_vista=?, salida=?,
                        segundos_visible=?, max_confianza=?, detecciones_yolo=?,
+                       recuperaciones=?, recuperaciones_apariencia=?,
                        nota=?, actualizado=?, enviado=NULL WHERE id=?""",
                 (utc_iso(track.last_seen_wall), utc_iso(),
                  round(track.visible_seconds, 2), round(track.max_confidence, 4),
-                 track.yolo_hits, note, utc_iso(), track.id))
+                 track.yolo_hits, track.recoveries, track.recoveries_by_appearance,
+                 note, utc_iso(), track.id))
 
     def session_finished(self, stats) -> None:
         with self._lock:
             self._db.execute(
                 """INSERT OR REPLACE INTO sesion_analisis (id, camara, inicio, fin,
                        fotogramas, inferencias_yolo, ahorro, motivos,
-                       nuevas_por_motivo, trayectorias, max_personas, error)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       nuevas_por_motivo, reapariciones, trayectorias, max_personas,
+                       error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (stats.id, stats.camera, utc_iso(stats.started_wall),
                  utc_iso(stats.ended_wall), stats.frames, stats.yolo_runs,
                  round(stats.savings, 4),
                  json.dumps(dict(stats.reasons), ensure_ascii=False),
                  json.dumps(dict(stats.new_by_reason), ensure_ascii=False),
+                 json.dumps(dict(getattr(stats, "recoveries", {})), ensure_ascii=False),
                  stats.tracks, stats.max_people, stats.error))
 
     # --- eventos del sistema ----------------------------------------------

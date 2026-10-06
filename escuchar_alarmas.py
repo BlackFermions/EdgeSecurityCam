@@ -52,7 +52,7 @@ def configure_logging(log_file: Path | None, verbose: bool) -> None:
     )
 
 
-def load_verifier(args, hosts: list[str], username: str, password: str):
+def load_verifier(args, hosts: list[str], username: str, password: str, viewer=None):
     # Import diferido: sin YOLO el receptor no necesita ultralytics.
     from src.analysis import AnalysisManager
     from src.person_verifier import PersonDetector, rtsp_url
@@ -72,7 +72,7 @@ def load_verifier(args, hosts: list[str], username: str, password: str):
              args.yolo_size)
     return AnalysisManager(
         detector, {host: rtsp_url(host, username, password) for host in hosts},
-        args.snapshots_dir)
+        args.snapshots_dir, viewer=viewer)
 
 
 def main() -> int:
@@ -102,6 +102,8 @@ def main() -> int:
                         help="Tamaño de entrada de YOLO (320, 416 o 640)")
     parser.add_argument("--snapshots-dir", type=Path, default=BASE_DIR / "capturas",
                         help="Carpeta de las fotos de cada alarma con personas")
+    parser.add_argument("--ver", action="store_true",
+                        help="Abre una ventana con el vídeo analizado en tiempo real")
     parser.add_argument("--raw", action="store_true",
                         help="Muestra también cada evento recibido, no solo los cambios")
     args = parser.parse_args()
@@ -133,7 +135,20 @@ def main() -> int:
         store = NodeStore(args.db)
         log.info("Base de datos: %s", args.db)
 
-    verifier = None if args.no_yolo else load_verifier(args, hosts, username, password)
+    viewer = None
+    if args.ver:
+        if args.no_yolo:
+            log.error("--ver necesita YOLO: quita --no-yolo.")
+            return 2
+        from src.person_verifier import rtsp_url
+        from src.viewer import LiveViewer
+        viewer = LiveViewer(hosts, {host: rtsp_url(host, username, password)
+                                    for host in hosts})
+    verifier = (None if args.no_yolo
+                else load_verifier(args, hosts, username, password, viewer))
+    if verifier is None and viewer is not None:
+        viewer.close()
+        viewer = None
     ia = ({"modelo": Path(args.model).name, "confianza": args.yolo_confidence,
            "imgsz": args.yolo_size, "confirmar_fotogramas": 2, "decidir_s": 4.0,
            "seguimiento": "yolo+flujo-lk", "yolo_max_s_movimiento": 1.0,
@@ -146,11 +161,19 @@ def main() -> int:
     node.start()
     stop = threading.Event()
     try:
-        # Esperas cortas: en Windows una espera sin límite no atiende Ctrl+C.
-        while not stop.wait(1.0):
-            pass
+        if viewer is not None:
+            log.info("Ventana abierta: q o Esc para cerrar CamDetector.")
+            while viewer.refresh():
+                pass
+            log.info("Ventana cerrada.")
+        else:
+            # Esperas cortas: en Windows una espera sin límite no atiende Ctrl+C.
+            while not stop.wait(1.0):
+                pass
     except KeyboardInterrupt:
         log.info("Cerrando...")
+    if viewer is not None:
+        viewer.close()
     node.close()
     if store is not None:
         store.close()
