@@ -1,0 +1,5 @@
+# La recepción de alarmas y la base de datos solo usan la biblioteca estándar.
+# Verificación con YOLO (ultralytics instala también PyTorch en CPU):
+ultralytics>=8.4.56,<8.5
+opencv-python>=4.10,<5
+numpy>=1.26,<3

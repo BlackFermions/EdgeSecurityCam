@@ -1,0 +1,14 @@
+# Credenciales y datos locales del nodo
+claves.txt
+data/
+logs/
+capturas/
+*.log
+
+# Modelos (se descargan en la instalación)
+models/*.pt
+
+# Python
+.venv/
+__pycache__/
+*.pyc
