@@ -35,7 +35,9 @@ class CamDetectorNode:
     def __init__(self, hosts: list[str], username: str, password: str,
                  store: NodeStore | None, motion_mode: str = "auto",
                  verifier=None, ia: dict[str, Any] | None = None,
-                 config_interval: float = 60.0, base_dir: Path | None = None) -> None:
+                 config_interval: float = 60.0, base_dir: Path | None = None,
+                 idle_sources: dict | None = None, idle_interval: float = 10.0,
+                 idle_min_confidence: float = 0.50) -> None:
         self.hosts = hosts
         self.store = store
         self.verifier = verifier
@@ -62,6 +64,17 @@ class CamDetectorNode:
         if verifier is not None:
             verifier.set_callbacks(self._on_verdict, self._on_verification_finished,
                                    self._on_track, self._on_session)
+        # Verificación en reposo: solo con YOLO disponible y una fuente de
+        # fotogramas por cámara.
+        self.idle_checkers = []
+        if verifier is not None and idle_sources and idle_interval > 0:
+            from src.idle_check import IdleChecker
+            self.idle_checkers = [
+                IdleChecker(host, idle_sources[host], verifier.detector,
+                            verifier.has_session, self._on_idle_person,
+                            self._on_idle_status, interval=idle_interval,
+                            min_confidence=idle_min_confidence)
+                for host in hosts if host in idle_sources]
 
     # --- ciclo de vida ----------------------------------------------------
 
@@ -74,6 +87,11 @@ class CamDetectorNode:
             self.watchers[host].start()
         for listener in self.listeners:
             listener.start()
+        for checker in self.idle_checkers:
+            checker.start()
+        if self.idle_checkers:
+            log.info("Verificación en reposo: 1 fotograma cada %.0f s si la cámara no avisa.",
+                     self.idle_checkers[0].interval)
         log.info("Escuchando %d cámara(s). Ctrl+C para salir.", len(self.hosts))
 
     def close(self) -> None:
@@ -82,6 +100,8 @@ class CamDetectorNode:
         self._closing = True
         for watcher in self.watchers.values():
             watcher.request_stop()
+        for checker in self.idle_checkers:
+            checker.request_stop()
         for listener in self.listeners:
             listener.request_stop()
         for host in self.hosts:
@@ -207,6 +227,30 @@ class CamDetectorNode:
             log.info("[%s] %s", camera, message)
             self._system_event(camera, "conexion" if connected else "desconexion", message)
         return report
+
+    # --- verificación en reposo ------------------------------------------------
+
+    def _on_idle_person(self, camera: str, result) -> None:
+        """YOLO vio a alguien sin que la cámara avisara: se abre una sesión."""
+        if self._closing:
+            return
+        log.info("[%s] >>> PERSONA DETECTADA EN REPOSO (la cámara no avisó) · "
+                 "confianza %.2f", camera, max(result.confidences, default=0.0))
+        alarm_id = None
+        if self.store is not None:
+            now = datetime.now(timezone.utc)
+            alarm_id = self.store.alarm_started(camera, "reposo", now)
+            self.store.alarm_ended(alarm_id, now, None,
+                                   "detectada por verificación en reposo; "
+                                   "la cámara no avisó")
+        if self.verifier is not None:
+            # La sesión dura mientras haya personas o falte el veredicto.
+            self.verifier.alarm_started(camera, alarm_id)
+            self.verifier.alarm_ended(camera)
+
+    def _on_idle_status(self, camera: str, message: str) -> None:
+        log.info("[%s] %s", camera, message)
+        self._system_event(camera, "reposo", message)
 
     # --- verificación YOLO -------------------------------------------------
 

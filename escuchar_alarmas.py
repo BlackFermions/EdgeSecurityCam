@@ -98,6 +98,11 @@ def main() -> int:
                         help="Modelo YOLO (por defecto yolo26n)")
     parser.add_argument("--yolo-confidence", type=float, default=0.40,
                         help="Confianza mínima de YOLO para contar una persona")
+    parser.add_argument("--idle-check-seconds", type=float, default=10.0,
+                        help="Verificación en reposo: 1 fotograma cada N s aunque la "
+                             "cámara no avise (0 la desactiva)")
+    parser.add_argument("--idle-min-confidence", type=float, default=0.50,
+                        help="Confianza mínima de YOLO para abrir sesión desde reposo")
     parser.add_argument("--yolo-size", type=int, default=416,
                         help="Tamaño de entrada de YOLO (320, 416 o 640)")
     parser.add_argument("--snapshots-dir", type=Path, default=BASE_DIR / "capturas",
@@ -111,6 +116,9 @@ def main() -> int:
 
     if args.yolo_size not in (320, 416, 480, 640):
         log.error("--yolo-size debe ser 320, 416, 480 o 640.")
+        return 2
+    if args.idle_check_seconds and not 3.0 <= args.idle_check_seconds <= 600.0:
+        log.error("--idle-check-seconds debe ser 0 o estar entre 3 y 600.")
         return 2
     if not 10.0 <= args.config_interval <= 3600.0:
         log.error("--config-interval debe estar entre 10 y 3600 s.")
@@ -156,9 +164,22 @@ def main() -> int:
            "yolo_max_s_quieto": 3.0, "disparo_min_s": 0.5}
           if verifier is not None else {"modelo": None})
 
+    idle_sources = None
+    if verifier is not None and args.idle_check_seconds:
+        from src.idle_check import SnapshotSource
+        from src.person_verifier import rtsp_url
+        idle_sources = {host: SnapshotSource(host, username, password,
+                                             rtsp_url(host, username, password))
+                        for host in hosts}
+        ia["reposo_cada_s"] = args.idle_check_seconds
+        ia["reposo_confianza"] = args.idle_min_confidence
+
     node = CamDetectorNode(hosts, username, password, store,
                            motion_mode=args.motion_mode, verifier=verifier, ia=ia,
-                           config_interval=args.config_interval, base_dir=BASE_DIR)
+                           config_interval=args.config_interval, base_dir=BASE_DIR,
+                           idle_sources=idle_sources,
+                           idle_interval=args.idle_check_seconds,
+                           idle_min_confidence=args.idle_min_confidence)
     node.start()
     stop = threading.Event()
     try:

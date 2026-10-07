@@ -361,6 +361,15 @@ class AnalysisManager:
         if session is not None:
             session.alarm_ended()
 
+    @property
+    def detector(self) -> PersonDetector:
+        return self._detector
+
+    def has_session(self, camera: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(camera)
+        return session is not None and session.is_alive()
+
     def close(self) -> None:
         with self._lock:
             sessions = list(self._sessions.values())

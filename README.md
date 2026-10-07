@@ -72,7 +72,8 @@ CPU (decodificar el vídeo continuo y dibujar); es para depurar y calibrar.
 Sin `--camera`, busca la cámara por su MAC con ONVIF. Varias cámaras se indican
 repitiendo `--camera`. Otras opciones: `--db`, `--no-db`, `--config-interval`,
 `--yolo-size` (416 por defecto), `--yolo-confidence`, `--model`,
-`--snapshots-dir`, `--motion-mode`.
+`--snapshots-dir`, `--motion-mode`, `--idle-check-seconds` (10 por defecto,
+0 la desactiva), `--idle-min-confidence` (0,50).
 
 Salida típica:
 
@@ -99,8 +100,8 @@ Salida típica:
 
 ```
 REPOSO                 ALARMA DE LA CÁMARA          PERSONAS PRESENTES
-YOLO dormido,          YOLO ~5 fps hasta el         YOLO ~1 fps (3 s si están quietas)
-CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre detecciones
+1 fotograma a YOLO     YOLO ~5 fps hasta el         YOLO ~1 fps (3 s si están quietas)
+cada 10 s              veredicto (4–8 s)            + flujo óptico entre detecciones
       └── la cámara avisa ──►     │                 + salvaguardas que despiertan a YOLO
                                   └── persona confirmada ──►│
                                                             └─ nadie y sin alarma ─► REPOSO
@@ -118,11 +119,21 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
    mismo tema. Con Motion Detect apagado la alarma se registra como persona;
    con Motion Detect activo, como movimiento. Se ajusta solo si la
    configuración cambia.
-4. **Sesión de análisis:** la primera alarma abre el substream RTSP
+4. **Verificación en reposo:** la cámara no avisa en zonas oscuras ni con
+   personas quietas, y sin aviso el análisis no se despertaría. Por eso, cada
+   10 s sin sesión abierta se toma **un** fotograma (foto suelta ONVIF
+   `GetSnapshotUri`; si la cámara no la ofrece, RTSP abierto y cerrado al
+   momento) y pasa por YOLO. Si hay una persona (confianza ≥ 0,50) se abre una
+   sesión como si hubiera llegado una alarma, registrada con **tipo `reposo`**
+   ("la cámara no avisó"), lo que permite medir cuántas veces falla la cámara.
+   Tras un disparo espera 60 s antes de volver a disparar (evita repetir
+   sesiones por un objeto quieto confundido con persona). Coste: ~130 ms de
+   YOLO cada 10 s (~1–2% de un núcleo).
+5. **Sesión de análisis:** la primera alarma abre el substream RTSP
    (`/stream2`); las alarmas siguientes se unen a la misma sesión. La sesión
    dura mientras la alarma siga activa **o haya personas seguidas**, y se
    cierra sola después.
-5. **Verificación de cada alarma** (YOLO26 nano, 416 px, solo clase persona):
+6. **Verificación de cada alarma** (YOLO26 nano, 416 px, solo clase persona):
    - **confirmada:** persona en 2 inferencias seguidas;
    - **descartada:** 4 s sin ver a nadie; si YOLO vio a alguien al menos una
      vez (p. ej. con poca luz), espera hasta 8 s antes de descartar, para no
@@ -133,7 +144,7 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
    - al cerrar la sesión se escribe **un único resumen** (alarmas,
      confirmadas, máximo de personas, foto) y una línea de eficiencia; cada
      alarma guarda sus datos en la base.
-6. **Seguimiento corporal (algoritmos clásicos, sin redes neuronales):** YOLO
+7. **Seguimiento corporal (algoritmos clásicos, sin redes neuronales):** YOLO
    crea las trayectorias y corrige su posición; entre dos inferencias:
    - **flujo óptico Lucas-Kanade** a media resolución mueve y **escala** cada
      caja (se agranda o achica cuando la persona se acerca o se aleja);
@@ -167,7 +178,7 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
      detección que aparece **en el interior** habiendo alguien perdido o sin
      pareja es esa misma persona (salvo ropa claramente distinta); solo una
      detección junto a un borde puede ser alguien que entra.
-7. **Salir o desaparecer.** Nadie desaparece de una casa: solo se sale por un
+8. **Salir o desaparecer.** Nadie desaparece de una casa: solo se sale por un
    borde de la imagen, moviéndose hacia él. Si YOLO deja de ver a alguien
    (2 inferencias y 2 s):
 
@@ -177,7 +188,7 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
    | En el interior, **o quieta junto a un borde** | **oculta** (mueble, zona oscura, agachada, falla) | se la busca con YOLO cada 3 s; a los 2 min: **DESAPARECIÓ**, anomalía a revisar |
 
    Mientras haya personas en gracia u ocultas la sesión sigue abierta.
-8. **Salvaguardas.** El ahorro solo aplica a seguir a quien ya fue detectado;
+9. **Salvaguardas.** El ahorro solo aplica a seguir a quien ya fue detectado;
    detectar lo nuevo nunca se retrasa más de ~0,5 s. YOLO se ejecuta si:
 
    | Motivo | Cuándo |
@@ -192,7 +203,7 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
    La base registra cuántas inferencias hubo por motivo y **por qué motivo se
    detectó cada persona**. Si aparecen personas nuevas detectadas por
    `intervalo`, la puerta de movimiento no las vio a tiempo y hay que ajustarla.
-9. **Base local:** alarmas, veredictos, personas seguidas y estadísticas de
+10. **Base local:** alarmas, veredictos, personas seguidas y estadísticas de
    cada sesión, con la versión de configuración vigente.
 
 ### Consumo medido (PC de pruebas, 8 núcleos, CPU, sin GPU)
@@ -223,7 +234,7 @@ ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
 | Tabla | Una fila por | Contenido |
 |---|---|---|
 | `config_camara` | versión de configuración de una cámara | `vigente_desde`/`vigente_hasta`, Human/Motion Detect (activo, sensibilidad, duración), modelo, firmware, parámetros de IA y seguimiento, configuración completa en JSON (`datos`) |
-| `alarma` | alarma de la cámara | UUID, cámara, `config_id`, tipo, inicio, fin, duración, veredicto, máximo de personas, confianza, fotogramas, segundos hasta la primera persona, foto, nota |
+| `alarma` | alarma de la cámara o de la verificación en reposo | UUID, cámara, `config_id`, tipo (`human`, `motion` o `reposo` = la cámara no avisó), inicio, fin, duración, veredicto, máximo de personas, confianza, fotogramas, segundos hasta la primera persona, foto, nota |
 | `persona_track` | aparición de una persona | UUID, `codigo` legible, cámara, alarma y sesión, entrada, última vista, salida, segundos visible, confianza máxima, detecciones YOLO, `motivo_deteccion`, `recuperaciones` y `recuperaciones_apariencia`, nota (salió por el borde / DESAPARECIÓ en el centro / sesión terminada) |
 | `sesion_analisis` | sesión de análisis | inicio, fin, fotogramas, inferencias YOLO, ahorro, inferencias y personas nuevas por motivo, reapariciones por método (JSON) |
 | `evento_sistema` | evento del nodo | inicio, fin, conexión, desconexión, cambios de configuración, errores |
@@ -247,8 +258,9 @@ ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
   una persona sí.
 - Human Detect **no detecta bien a personas de espaldas**; por eso Motion
   Detect queda activo como disparador y YOLO confirma.
-- En **zonas oscuras** la cámara no detecta movimiento: si la cámara no avisa,
-  YOLO no se despierta. Revisar el cambio a modo noche/IR o la iluminación.
+- En **zonas oscuras** la cámara no detecta movimiento. La verificación en
+  reposo lo compensa en parte (si YOLO alcanza a ver a la persona); revisar
+  igualmente el cambio a modo noche/IR o la iluminación.
 - Cada detección tiene su Alarm Duration: la duración de la alarma da una pista
   de qué la disparó (≈2 s movimiento, ≥20 s persona).
 - Con Motion Detect activo (sensibilidad 80) hubo falsas alarmas sin nadie en
@@ -296,6 +308,7 @@ src/camera_web.py        acceso de solo lectura a la web de la cámara
 src/analysis.py          sesión de análisis por cámara: verificación + seguimiento
 src/tracking.py          flujo óptico, puerta de movimiento, trayectorias y salvaguardas
 src/person_verifier.py   detector YOLO y veredicto de cada alarma
+src/idle_check.py        verificación periódica en reposo (foto ONVIF o RTSP)
 src/storage.py           base SQLite del nodo
 src/discovery.py         búsqueda de la cámara por MAC (WS-Discovery)
 src/config.py            credenciales
