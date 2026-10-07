@@ -30,6 +30,20 @@ class VerificationTrackerTests(unittest.TestCase):
         self.assertEqual(self.tracker.add(frame(104.0)), "discarded")
         self.assertIsNone(self.tracker.add(frame(104.2)))
 
+    def test_seen_person_extends_decision_window(self):
+        # 2026-10-07 08:36:39: YOLO vio a alguien una vez (0.52) y se descartó a
+        # los 4 s para confirmarse después. Ahora espera hasta 8 s.
+        self.assertIsNone(self.tracker.add(frame(101.0, 0.52)))
+        self.assertIsNone(self.tracker.add(frame(101.2)))
+        self.assertIsNone(self.tracker.check_timeout(105.0))
+        self.assertEqual(self.tracker.add(frame(103.0, 0.6)), None)
+        self.assertEqual(self.tracker.add(frame(103.2, 0.7)), "confirmed")
+
+    def test_seen_once_then_nothing_discards_at_extended_limit(self):
+        self.tracker.add(frame(101.0, 0.52))
+        self.assertIsNone(self.tracker.check_timeout(107.9))
+        self.assertEqual(self.tracker.check_timeout(108.0), "discarded")
+
     def test_discarded_can_become_confirmed(self):
         self.tracker.add(frame(104.0))
         self.tracker.add(frame(110.0, 0.7))

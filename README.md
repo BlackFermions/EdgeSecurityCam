@@ -88,9 +88,11 @@ Salida típica:
 [192.168.100.109]     persona cam109-20261006-145740-1 entró (confianza 0.74 · YOLO por movimiento_nuevo)
 [192.168.100.109]     persona cam109-20261006-145731-1 salió (34.2 s visible · 21 detecciones YOLO)
 [192.168.100.109]     persona cam109-20261006-145740-1 salió (12.0 s visible · 9 detecciones YOLO)
-[192.168.100.109]     resumen YOLO: máximo 2 persona(s) · 31 fotogramas · foto capturas/2026-10-06/...jpg
-[192.168.100.109]     sesión: 412 fotogramas · 52 YOLO (87% sin YOLO) · 2 persona(s) seguida(s) · motivos: ...
+[192.168.100.109]     resumen de sesión: 1 alarma(s), 1 confirmada(s) · máximo 2 persona(s) · 2 seguida(s) · 0 reaparición(es) · foto capturas/2026-10-06/...jpg
+[192.168.100.109]     eficiencia: 412 fotogramas · 52 YOLO (87% sin YOLO) · motivos: ...
 [192.168.100.109] CONFIGURACIÓN CAMBIADA: Motion Detect: sensitivity 80 → 60
+[192.168.100.109] no se pudo leer la configuración web (la interfaz web de la cámara no respondió)
+[192.168.100.109] configuración web recuperada tras 60 s
 ```
 
 ## Cómo funciona
@@ -106,7 +108,9 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
 
 1. **Configuración:** al arrancar y cada 60 s lee Human Detect, Motion Detect,
    modelo y firmware por la web de la cámara. Si cambió, crea una nueva versión
-   en la base y lo muestra en el registro.
+   en la base y lo muestra en el registro. Si la web deja de responder se avisa
+   una sola vez, y al volver se registra cuánto duró la caída (también en
+   `evento_sistema`, tipo `recuperacion`).
 2. **Alarmas:** se suscribe a los eventos ONVIF (PullPoint); la conexión la
    inicia el nodo, sin abrir puertos. La cámara reenvía el estado ~5 veces por
    segundo; el programa lo reduce a **inicio** y **fin** con duración.
@@ -120,10 +124,15 @@ CPU ~0                 veredicto (≤ 4 s)            + flujo óptico entre dete
    cierra sola después.
 5. **Verificación de cada alarma** (YOLO26 nano, 416 px, solo clase persona):
    - **confirmada:** persona en 2 inferencias seguidas;
-   - **descartada:** 4 s sin confirmar (puede pasar a confirmada si alguien
-     aparece después);
+   - **descartada:** 4 s sin ver a nadie; si YOLO vio a alguien al menos una
+     vez (p. ej. con poca luz), espera hasta 8 s antes de descartar, para no
+     dar un veredicto que luego haya que corregir (puede pasar a confirmada si
+     alguien aparece después);
    - **sin_video:** no se pudo abrir el vídeo;
-   - aunque la alarma dure 1–2 s, se analiza hasta tener veredicto.
+   - aunque la alarma dure 1–2 s, se analiza hasta tener veredicto;
+   - al cerrar la sesión se escribe **un único resumen** (alarmas,
+     confirmadas, máximo de personas, foto) y una línea de eficiencia; cada
+     alarma guarda sus datos en la base.
 6. **Seguimiento corporal (algoritmos clásicos, sin redes neuronales):** YOLO
    crea las trayectorias y corrige su posición; entre dos inferencias:
    - **flujo óptico Lucas-Kanade** a media resolución mueve y **escala** cada

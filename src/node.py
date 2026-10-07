@@ -53,7 +53,8 @@ class CamDetectorNode:
                         for host in hosts}
         self.watchers = {host: ConfigWatcher(host, CameraWeb(host, username, password),
                                              {"ia": ia or {}}, self._on_config,
-                                             self._on_config_error, config_interval)
+                                             self._on_config_error, config_interval,
+                                             self._on_config_recovered)
                          for host in hosts}
         self.listeners = [CameraEventListener(self.clients[host], self._on_alarm,
                                               self._status_handler(host))
@@ -127,6 +128,11 @@ class CamDetectorNode:
     def _on_config_error(self, camera: str, message: str) -> None:
         log.info("[%s] no se pudo leer la configuración web (%s)", camera, message)
         self._system_event(camera, "error", f"configuración: {message}")
+
+    def _on_config_recovered(self, camera: str, seconds: float) -> None:
+        log.info("[%s] configuración web recuperada tras %.0f s", camera, seconds)
+        self._system_event(camera, "recuperacion",
+                           f"configuración web recuperada tras {seconds:.0f} s")
 
     # --- alarmas ----------------------------------------------------------
 
@@ -218,18 +224,16 @@ class CamDetectorNode:
                                      summary.max_people, summary.best_confidence,
                                      summary.first_person_after)
 
+    def _relative(self, path: Path | None) -> str | None:
+        if path is None:
+            return None
+        if self.base_dir and path.is_relative_to(self.base_dir):
+            return path.relative_to(self.base_dir).as_posix()
+        return path.as_posix()
+
     def _on_verification_finished(self, summary) -> None:
-        if summary.error:
-            log.info("[%s]     análisis: %s", summary.camera, summary.error)
-        photo = None
-        if summary.snapshot is not None:
-            photo = (summary.snapshot.relative_to(self.base_dir).as_posix()
-                     if self.base_dir and summary.snapshot.is_relative_to(self.base_dir)
-                     else summary.snapshot.as_posix())
-        if summary.max_people:
-            log.info("[%s]     resumen YOLO: máximo %d persona(s) · %d fotogramas · "
-                     "foto %s", summary.camera, summary.max_people, summary.frames,
-                     photo or "no guardada")
+        # Sin registro por alarma: la sesión escribe un único resumen al cerrar.
+        photo = self._relative(summary.snapshot)
         if self.store is not None and summary.alarm_id:
             self.store.alarm_verification_finished(
                 summary.alarm_id, summary.frames, summary.max_people,
@@ -268,10 +272,16 @@ class CamDetectorNode:
 
     def _on_session(self, stats) -> None:
         reasons = ", ".join(f"{name} {count}" for name, count in stats.reasons.most_common())
-        log.info("[%s]     sesión: %d fotogramas · %d YOLO (%.0f%% sin YOLO) · "
-                 "%d persona(s) seguida(s) · %d reaparición(es) · motivos: %s",
-                 stats.camera, stats.frames, stats.yolo_runs, stats.savings * 100,
-                 stats.tracks, sum(stats.recoveries.values()), reasons or "-")
+        if stats.error:
+            log.info("[%s]     análisis: %s", stats.camera, stats.error)
+        log.info("[%s]     resumen de sesión: %d alarma(s), %d confirmada(s) · máximo "
+                 "%d persona(s) · %d seguida(s) · %d reaparición(es) · foto %s",
+                 stats.camera, stats.alarms, stats.confirmed, stats.max_people,
+                 stats.tracks, sum(stats.recoveries.values()),
+                 self._relative(stats.snapshot) or "sin personas")
+        log.info("[%s]     eficiencia: %d fotogramas · %d YOLO (%.0f%% sin YOLO) · "
+                 "motivos: %s", stats.camera, stats.frames, stats.yolo_runs,
+                 stats.savings * 100, reasons or "-")
         if self.store is not None:
             self.store.session_finished(stats)
 

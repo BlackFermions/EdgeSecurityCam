@@ -95,5 +95,46 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(row["nota"], "conexión perdida")
 
 
+class SessionSummaryTests(unittest.TestCase):
+    def test_one_summary_line_per_session(self):
+        from collections import Counter
+        from types import SimpleNamespace
+        node = CamDetectorNode([CAM], "u", "p", None)
+        stats = SimpleNamespace(camera=CAM, error=None, alarms=3, confirmed=2,
+                                max_people=1, tracks=1, recoveries=Counter(),
+                                snapshot=None, frames=751, yolo_runs=112,
+                                savings=0.85, reasons=Counter(intervalo=29))
+        with self.assertLogs("alarmas", level="INFO") as captured:
+            node._on_session(stats)
+        summaries = [line for line in captured.output if "resumen de sesión" in line]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn("3 alarma(s), 2 confirmada(s)", summaries[0])
+
+
+class ConfigRecoveryTests(unittest.TestCase):
+    def test_web_failure_is_reported_once_and_recovery_with_duration(self):
+        from src.camera_config import ConfigWatcher
+        from src.camera_web import CameraWebError
+
+        class FlakyWeb:
+            failing = True
+
+            def get(self, module):
+                if self.failing:
+                    raise CameraWebError("la interfaz web de la cámara no respondió")
+                return {"devtype": "W51-TY", "version": "V1", "enable": 1}
+
+        web, events = FlakyWeb(), []
+        watcher = ConfigWatcher(CAM, web, {}, lambda *_: events.append("config"),
+                                lambda camera, message: events.append("error"),
+                                on_recovered=lambda camera, s: events.append("recuperada"))
+        watcher.read_once()
+        watcher.read_once()                       # sigue caída: sin aviso repetido
+        web.failing = False
+        watcher.read_once()
+        watcher.read_once()                       # ya estable: sin aviso
+        self.assertEqual(events, ["error", "recuperada", "config", "config"])
+
+
 if __name__ == "__main__":
     unittest.main()

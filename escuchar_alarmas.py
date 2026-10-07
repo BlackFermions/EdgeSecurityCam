@@ -151,6 +151,7 @@ def main() -> int:
         viewer = None
     ia = ({"modelo": Path(args.model).name, "confianza": args.yolo_confidence,
            "imgsz": args.yolo_size, "confirmar_fotogramas": 2, "decidir_s": 4.0,
+           "decidir_con_persona_s": 8.0,
            "seguimiento": "yolo+flujo-lk", "yolo_max_s_movimiento": 1.0,
            "yolo_max_s_quieto": 3.0, "disparo_min_s": 0.5}
           if verifier is not None else {"modelo": None})

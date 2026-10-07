@@ -53,6 +53,9 @@ class SessionStats:
     tracks: int = 0
     max_people: int = 0
     error: str | None = None
+    alarms: int = 0               # alarmas de la cámara atendidas en la sesión
+    confirmed: int = 0            # de ellas, confirmadas por YOLO
+    snapshot: Path | None = None  # foto de la sesión (la de más personas)
 
     @property
     def savings(self) -> float:
@@ -284,6 +287,9 @@ class AnalysisSession(threading.Thread):
             capture.release()
 
         snapshot = self._save(*best) if best is not None else None
+        self.stats.snapshot = snapshot
+        self.stats.alarms = len(verifications)
+        self.stats.confirmed = sum(v.summary.verdict == "confirmed" for v in verifications)
         for tracker in verifications:
             tracker.summary.snapshot = snapshot
             if self.stats.error:

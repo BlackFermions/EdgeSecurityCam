@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from typing import Any, Callable
 
 from src.camera_web import CameraWeb, CameraWebError
@@ -82,26 +83,30 @@ class ConfigWatcher(threading.Thread):
 
     def __init__(self, camera: str, web: CameraWeb, extra: dict[str, Any],
                  on_config: Callable[[str, dict[str, Any]], None],
-                 on_error: Callable[[str, str], None], interval: float = 60.0) -> None:
+                 on_error: Callable[[str, str], None], interval: float = 60.0,
+                 on_recovered: Callable[[str, float], None] | None = None) -> None:
         super().__init__(name=f"config-{camera}", daemon=True)
         self.camera = camera
         self._web = web
         self._extra = extra
         self._on_config = on_config
         self._on_error = on_error
+        self._on_recovered = on_recovered or (lambda *_: None)
         self._interval = interval
         self._halt = threading.Event()
-        self._failing = False
+        self._failing_since: float | None = None   # inicio de la caída actual
 
     def read_once(self) -> dict[str, Any] | None:
         try:
             config = read_camera_config(self._web)
         except CameraWebError as error:
-            if not self._failing:
+            if self._failing_since is None:          # se avisa una vez por caída
+                self._failing_since = time.monotonic()
                 self._on_error(self.camera, str(error))
-            self._failing = True
             return None
-        self._failing = False
+        if self._failing_since is not None:
+            self._on_recovered(self.camera, time.monotonic() - self._failing_since)
+            self._failing_since = None
         config.update(self._extra)
         self._on_config(self.camera, config)
         return config

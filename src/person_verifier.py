@@ -51,19 +51,23 @@ class VerificationSummary:
 class VerificationTracker:
     """Decide persona confirmada o descartada a partir de inferencias sucesivas.
 
-    Confirma con ``confirm_frames`` fotogramas seguidos con persona; descarta si
-    pasan ``decide_seconds`` sin confirmar. Una alarma descartada puede pasar a
+    Confirma con ``confirm_frames`` fotogramas seguidos con persona. Descarta si
+    pasan ``decide_seconds`` sin ver a nadie; si YOLO ya vio a alguien al menos
+    una vez (p. ej. con poca luz no lo ve en dos fotogramas seguidos), espera
+    hasta ``seen_decide_seconds`` antes de descartar, para no dar un veredicto
+    que luego haya que corregir. Una alarma descartada aún puede pasar a
     confirmada si alguien aparece después (alarmas largas).
     """
 
     def __init__(self, camera: str, started_at: float, confirm_frames: int = 2,
-                 decide_seconds: float = 4.0) -> None:
-        if confirm_frames < 1 or decide_seconds <= 0:
+                 decide_seconds: float = 4.0, seen_decide_seconds: float = 8.0) -> None:
+        if confirm_frames < 1 or not 0 < decide_seconds <= seen_decide_seconds:
             raise ValueError("parámetros de verificación no válidos")
         self.summary = VerificationSummary(camera)
         self.started_at = started_at
         self.confirm_frames = confirm_frames
         self.decide_seconds = decide_seconds
+        self.seen_decide_seconds = seen_decide_seconds
         self._streak = 0
         self.best_frame_key: tuple[int, float] = (-1, 0.0)
 
@@ -83,7 +87,9 @@ class VerificationTracker:
         return self.check_timeout(result.at)
 
     def check_timeout(self, now: float) -> str | None:
-        if self.summary.verdict is None and now - self.started_at >= self.decide_seconds:
+        limit = (self.seen_decide_seconds if self.summary.first_person_after is not None
+                 else self.decide_seconds)
+        if self.summary.verdict is None and now - self.started_at >= limit:
             self.summary.verdict = "discarded"
             return "discarded"
         return None
