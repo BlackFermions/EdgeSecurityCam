@@ -3,3 +3,6 @@
 ultralytics>=8.4.56,<8.5
 opencv-python>=4.10,<5
 numpy>=1.26,<3
+# Asignación óptima (algoritmo húngaro) del seguimiento; no confiar en que
+# llegue como dependencia de ultralytics (versiones nuevas no la incluyen).
+scipy>=1.10,<2
