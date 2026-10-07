@@ -1,6 +1,6 @@
 import unittest
 
-from src.discovery import DEFAULT_CAMERA_MAC, parse_probe_matches
+from src.sources.discovery import DEFAULT_CAMERA_MAC, parse_probe_matches
 
 
 RESPONSE = b'''<?xml version="1.0"?>

@@ -2,7 +2,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-from src.camera_events import (
+from src.sources.camera_events import (
     AlarmStateTracker,
     CameraAlarm,
     normalize_topic,

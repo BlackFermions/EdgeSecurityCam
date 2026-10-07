@@ -27,8 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import read_credentials  # noqa: E402
-from src.camera_web import CameraWeb, CameraWebError  # noqa: E402
+from src.credentials import read_credentials  # noqa: E402
+from src.sources.camera_web import CameraWeb, CameraWebError  # noqa: E402
 
 
 SOAP = "http://www.w3.org/2003/05/soap-envelope"

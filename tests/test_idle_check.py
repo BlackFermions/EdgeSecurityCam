@@ -4,9 +4,10 @@ from pathlib import Path
 
 import numpy as np
 
-from src.idle_check import IdleChecker, SnapshotSource
+from src.analysis.idle import IdleChecker
+from src.sources.snapshot import SnapshotSource
 from src.node import CamDetectorNode
-from src.person_verifier import FrameResult
+from src.detection.base import FrameResult
 from src.storage import NodeStore
 
 
@@ -90,7 +91,7 @@ class SnapshotSourceTests(unittest.TestCase):
         self.assertEqual(source.method, "rtsp")
 
     def test_retries_discovery_when_camera_did_not_answer(self):
-        from src.camera_events import CameraEventError
+        from src.sources.camera_events import CameraEventError
         source = SnapshotSource(CAM, "u", "p", "rtsp://x")
         calls = []
 

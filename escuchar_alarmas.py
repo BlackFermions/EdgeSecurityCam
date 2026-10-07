@@ -23,9 +23,9 @@ from pathlib import Path
 os.environ.setdefault("KMP_BLOCKTIME", "0")
 os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
-from src.camera_events import MOTION_MODES  # noqa: E402
-from src.config import read_credentials  # noqa: E402
-from src.discovery import DEFAULT_CAMERA_MAC, resolve_camera_host  # noqa: E402
+from src.sources.camera_events import MOTION_MODES  # noqa: E402
+from src.credentials import read_credentials  # noqa: E402
+from src.sources.discovery import DEFAULT_CAMERA_MAC, resolve_camera_host  # noqa: E402
 from src.node import CamDetectorNode  # noqa: E402
 from src.storage import NodeStore  # noqa: E402
 
@@ -54,15 +54,16 @@ def configure_logging(log_file: Path | None, verbose: bool) -> None:
 
 def load_verifier(args, hosts: list[str], username: str, password: str, viewer=None):
     # Import diferido: sin YOLO el receptor no necesita ultralytics.
-    from src.analysis import AnalysisManager
-    from src.person_verifier import PersonDetector, rtsp_url
+    from src.analysis.session import AnalysisManager
+    from src.detection.yolo import YoloPersonDetector
+    from src.sources.video import rtsp_url
 
     model = args.model
     if not Path(model).exists():
         model = Path(model).name    # ultralytics lo descarga
     log.info("Cargando YOLO (%s)...", Path(model).name)
     try:
-        detector = PersonDetector(model, confidence=args.yolo_confidence,
+        detector = YoloPersonDetector(model, confidence=args.yolo_confidence,
                                   image_size=args.yolo_size)
     except Exception as error:      # noqa: BLE001 - se informa y se sigue sin YOLO
         log.error("YOLO no disponible (%s: %s); se registran solo las alarmas.",
@@ -148,8 +149,8 @@ def main() -> int:
         if args.no_yolo:
             log.error("--ver necesita YOLO: quita --no-yolo.")
             return 2
-        from src.person_verifier import rtsp_url
-        from src.viewer import LiveViewer
+        from src.sources.video import rtsp_url
+        from src.outputs.viewer import LiveViewer
         viewer = LiveViewer(hosts, {host: rtsp_url(host, username, password)
                                     for host in hosts})
     verifier = (None if args.no_yolo
@@ -166,7 +167,7 @@ def main() -> int:
 
     idle_sources = None
     if verifier is not None and args.idle_check_seconds:
-        from src.idle_check import SnapshotSource
+        from src.sources.snapshot import SnapshotSource
         from src.person_verifier import rtsp_url
         idle_sources = {host: SnapshotSource(host, username, password,
                                              rtsp_url(host, username, password))

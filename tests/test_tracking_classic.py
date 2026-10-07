@@ -8,17 +8,9 @@ import cv2
 import numpy as np
 
 from src.storage import NodeStore
-from src.tracking import (
-    FLOW_SCALE,
-    REASON_CONFIRM,
-    REASON_WATCH,
-    FlowTracker,
-    MotionModel,
-    TrackManager,
-    appearance_similarity,
-    assign,
-    color_signature,
-)
+from src.analysis.policy import REASON_CONFIRM, REASON_WATCH
+from src.identity.color import appearance_similarity, color_signature
+from src.tracking import FLOW_SCALE, FlowTracker, MotionModel, TrackManager, assign
 
 
 WALL = datetime(2026, 10, 6, 16, 0, 0)

@@ -1,24 +1,5 @@
-"""Seguimiento corporal de bajo consumo con algoritmos clásicos.
-
-YOLO (poco frecuente) crea las trayectorias y corrige su posición. Entre dos
-detecciones, sin redes neuronales:
-
-- **flujo óptico Lucas-Kanade** mueve y escala cada caja;
-- un **filtro de Kalman** de velocidad constante combina el flujo (ruidoso,
-  cada fotograma) con YOLO (preciso, ocasional) y predice dónde está una
-  persona que dejó de verse;
-- la **asignación húngara** reparte detecciones y trayectorias de forma óptima;
-- un **histograma de color del torso** (apariencia clásica) evita intercambiar
-  personas con ropa distinta y recupera a quien reaparece en otro sitio. Con
-  IR u oscuridad no hay color y solo cuenta la posición.
-
-Una puerta de movimiento por diferencia de fotogramas despierta a YOLO si algo
-se mueve fuera de las personas ya seguidas.
-
-Regla de seguridad: el ahorro solo aplica a seguir a quien ya fue detectado;
-ante cualquier duda (movimiento nuevo, trayectoria perdida, alarma nueva o
-demasiado tiempo sin YOLO) se ejecuta YOLO.
-"""
+"""Trayectorias de personas y su asociación con las detecciones (estilo
+ByteTrack, con Kalman, asignación húngara y apariencia intercambiable)."""
 
 from __future__ import annotations
 
@@ -26,29 +7,14 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
-import cv2
 import numpy as np
 
-
-Box = tuple[float, float, float, float]       # x1, y1, x2, y2 en píxeles
-
-# Motivos por los que se ejecuta YOLO (se registran para auditar el ahorro).
-REASON_CONFIRM = "confirmacion"       # alarma sin veredicto todavía
-REASON_ALARM = "alarma"               # la cámara inició una alarma nueva
-REASON_MOTION = "movimiento_nuevo"    # movimiento fuera de las personas seguidas
-REASON_LOST = "trayectoria_perdida"   # el flujo óptico perdió a alguien
-REASON_INTERVAL = "intervalo"         # tiempo máximo sin YOLO
-REASON_WATCH = "vigilancia"           # alarma activa sin personas seguidas
-
-FLOW_SCALE = 0.5            # el flujo y la puerta trabajan a media resolución
-
-
-def iou(a: Box, b: Box) -> float:
-    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
-    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
-    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    union = ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
-    return inter / union if union > 0 else 0.0
+from src.identity.base import AppearanceModel
+from src.identity.color import ColorHistogramAppearance
+from src.tracking.assignment import assign
+from src.tracking.flow import FlowTracker
+from src.tracking.geometry import Box, center, iou, size
+from src.tracking.kalman import MotionModel
 
 
 def camera_alias(camera: str) -> str:
@@ -56,234 +22,6 @@ def camera_alias(camera: str) -> str:
     last = camera.rsplit(".", 1)[-1]
     return f"cam{last}" if last.isdigit() else camera
 
-
-def _center(box: Box) -> tuple[float, float]:
-    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-
-
-def _size(box: Box) -> tuple[float, float]:
-    return max(box[2] - box[0], 1.0), max(box[3] - box[1], 1.0)
-
-
-def _box_from(cx: float, cy: float, width: float, height: float) -> Box:
-    return (cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2)
-
-
-# --- flujo óptico -----------------------------------------------------------
-
-class FlowTracker:
-    """Sigue una caja moviendo puntos característicos con Lucas-Kanade.
-
-    Trabaja sobre imágenes en gris a escala ``FLOW_SCALE``. Usa verificación
-    ida y vuelta: los puntos que no regresan a su origen se descartan. Estima
-    desplazamiento (mediana) y escala (mediana de cambios de distancia al
-    centro de los puntos, como Median Flow). Si quedan muy pocos puntos (zona
-    oscura, oclusión) la trayectoria se marca perdida y YOLO decide.
-    """
-
-    MAX_POINTS = 30
-    MIN_POINTS = 5
-    MAX_FB_ERROR = 1.5
-    MAX_SCALE_STEP = 0.08       # cambio de tamaño máximo por fotograma
-
-    def __init__(self, gray: np.ndarray, box: Box) -> None:
-        self.box = box
-        self.lost = False
-        self.moved = 0.0
-        self._points = self._seed(gray, box)
-        self._initial = len(self._points)
-        if self._initial < self.MIN_POINTS:
-            self.lost = True
-
-    @staticmethod
-    def _seed(gray: np.ndarray, box: Box) -> np.ndarray:
-        height, width = gray.shape[:2]
-        x1, y1, x2, y2 = (int(round(v * FLOW_SCALE)) for v in box)
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(width, x2), min(height, y2)
-        if x2 - x1 < 4 or y2 - y1 < 4:
-            return np.empty((0, 1, 2), np.float32)
-        points = cv2.goodFeaturesToTrack(gray[y1:y2, x1:x2], FlowTracker.MAX_POINTS,
-                                         0.01, 3)
-        if points is None:
-            return np.empty((0, 1, 2), np.float32)
-        return points.astype(np.float32) + np.float32([x1, y1])
-
-    def update(self, previous: np.ndarray, current: np.ndarray) -> bool:
-        """Mueve y escala la caja; devuelve False si la trayectoria se perdió."""
-        if self.lost or len(self._points) == 0:
-            self.lost = True
-            return False
-        params = dict(winSize=(15, 15), maxLevel=2)
-        new, status, _ = cv2.calcOpticalFlowPyrLK(previous, current, self._points,
-                                                  None, **params)
-        back, back_status, _ = cv2.calcOpticalFlowPyrLK(current, previous, new,
-                                                        None, **params)
-        error = np.linalg.norm((self._points - back).reshape(-1, 2), axis=1)
-        good = ((status.ravel() == 1) & (back_status.ravel() == 1)
-                & (error < self.MAX_FB_ERROR))
-        if good.sum() < max(self.MIN_POINTS, 0.3 * self._initial):
-            self.lost = True
-            return False
-        old_points = self._points.reshape(-1, 2)[good]
-        new_points = new.reshape(-1, 2)[good]
-        shift = np.median(new_points - old_points, axis=0)
-        old_spread = np.linalg.norm(old_points - np.median(old_points, axis=0), axis=1)
-        new_spread = np.linalg.norm(new_points - np.median(new_points, axis=0), axis=1)
-        valid = old_spread > 2.0
-        scale = float(np.median(new_spread[valid] / old_spread[valid])) if valid.any() else 1.0
-        scale = float(np.clip(scale, 1 - self.MAX_SCALE_STEP, 1 + self.MAX_SCALE_STEP))
-        dx, dy = float(shift[0]) / FLOW_SCALE, float(shift[1]) / FLOW_SCALE
-        cx, cy = _center(self.box)
-        width, height = _size(self.box)
-        self.box = _box_from(cx + dx, cy + dy, width * scale, height * scale)
-        self.moved = float(np.hypot(dx, dy))
-        self._points = new_points.reshape(-1, 1, 2)
-        return True
-
-
-# --- filtro de Kalman -------------------------------------------------------
-
-class MotionModel:
-    """Kalman de velocidad constante sobre el centro de la caja.
-
-    El tamaño se suaviza aparte (media móvil). Las mediciones del flujo óptico
-    se consideran más ruidosas que las de YOLO.
-    """
-
-    FLOW_NOISE = 8.0            # px, desviación de la medición por flujo
-    YOLO_NOISE = 3.0            # px, desviación de la medición por YOLO
-    ACCELERATION = 300.0        # px/s², cambios de velocidad de una persona
-
-    def __init__(self, box: Box, now: float) -> None:
-        cx, cy = _center(box)
-        self.x = np.array([cx, cy, 0.0, 0.0])
-        self.P = np.diag([25.0, 25.0, 400.0, 400.0])
-        self.width, self.height = _size(box)
-        self.t = now
-
-    def predict(self, now: float) -> None:
-        dt = now - self.t
-        if dt <= 0:
-            return
-        F = np.eye(4)
-        F[0, 2] = F[1, 3] = dt
-        G = np.array([[dt * dt / 2, 0], [0, dt * dt / 2], [dt, 0], [0, dt]])
-        self.x = F @ self.x
-        self.P = F @ self.P @ F.T + G @ G.T * self.ACCELERATION ** 2
-        self.t = now
-
-    def update(self, box: Box, now: float, noise: float, size_weight: float) -> None:
-        self.predict(now)
-        H = np.zeros((2, 4))
-        H[0, 0] = H[1, 1] = 1.0
-        z = np.array(_center(box))
-        S = H @ self.P @ H.T + np.eye(2) * noise ** 2
-        K = self.P @ H.T @ np.linalg.inv(S)
-        self.x = self.x + K @ (z - H @ self.x)
-        self.P = (np.eye(4) - K @ H) @ self.P
-        width, height = _size(box)
-        self.width += size_weight * (width - self.width)
-        self.height += size_weight * (height - self.height)
-
-    def box(self) -> Box:
-        return _box_from(self.x[0], self.x[1], self.width, self.height)
-
-    def extrapolate(self, now: float, horizon: float = 1.5) -> Box:
-        """Posición esperada sin modificar el estado. La velocidad se aplica
-        como máximo ``horizon`` s: una persona oculta suele detenerse."""
-        dt = min(max(now - self.t, 0.0), horizon)
-        return _box_from(self.x[0] + self.x[2] * dt, self.x[1] + self.x[3] * dt,
-                         self.width, self.height)
-
-    @property
-    def speed(self) -> float:
-        return float(np.hypot(self.x[2], self.x[3]))
-
-
-# --- apariencia clásica -----------------------------------------------------
-
-def color_signature(frame: np.ndarray | None, box: Box) -> np.ndarray | None:
-    """Histograma Hue-Saturation del torso, o None si no hay color útil.
-
-    Se usa la franja central (20–60% de la altura, 60% del ancho) para evitar
-    fondo, cabeza y piernas. Con IR, oscuridad o colores apagados casi ningún
-    píxel tiene saturación y la apariencia no se usa.
-    """
-    if frame is None:
-        return None
-    height, width = frame.shape[:2]
-    x1, y1, x2, y2 = box
-    bw, bh = x2 - x1, y2 - y1
-    tx1, tx2 = int(max(0, x1 + 0.2 * bw)), int(min(width, x2 - 0.2 * bw))
-    ty1, ty2 = int(max(0, y1 + 0.2 * bh)), int(min(height, y1 + 0.6 * bh))
-    if tx2 - tx1 < 6 or ty2 - ty1 < 6:
-        return None
-    hsv = cv2.cvtColor(frame[ty1:ty2, tx1:tx2], cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (0, 40, 40), (180, 255, 255))
-    if cv2.countNonZero(mask) < 0.15 * mask.size:
-        return None
-    histogram = cv2.calcHist([hsv], [0, 1], mask, [16, 8], [0, 180, 0, 256])
-    cv2.normalize(histogram, histogram, 1.0, 0.0, cv2.NORM_L1)
-    return histogram
-
-
-def appearance_similarity(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
-    """1 = mismo color, 0 = nada en común; None si alguno no tiene color."""
-    if a is None or b is None:
-        return None
-    return 1.0 - float(cv2.compareHist(a, b, cv2.HISTCMP_BHATTACHARYYA))
-
-
-def blend_signature(old: np.ndarray | None, new: np.ndarray | None,
-                    weight: float = 0.3) -> np.ndarray | None:
-    if new is None:
-        return old
-    if old is None:
-        return new
-    mixed = (1 - weight) * old + weight * new
-    cv2.normalize(mixed, mixed, 1.0, 0.0, cv2.NORM_L1)
-    return mixed
-
-
-# --- puerta de movimiento ---------------------------------------------------
-
-class MotionGate:
-    """Diferencia de fotogramas a baja resolución.
-
-    Indica si hay movimiento fuera de las cajas seguidas (posible persona
-    nueva) y si las personas seguidas se mueven.
-    """
-
-    def __init__(self, threshold: int = 25, min_fraction: float = 0.004,
-                 margin: float = 0.15) -> None:
-        self.threshold = threshold
-        self.min_fraction = min_fraction
-        self.margin = margin
-        self._previous: np.ndarray | None = None
-
-    def update(self, gray: np.ndarray, boxes: list[Box]) -> tuple[bool, bool]:
-        """Devuelve (movimiento fuera de las cajas, movimiento dentro)."""
-        small = cv2.GaussianBlur(cv2.resize(gray, (160, 90),
-                                            interpolation=cv2.INTER_AREA), (5, 5), 0)
-        previous, self._previous = self._previous, small
-        if previous is None:
-            return False, False
-        mask = cv2.absdiff(small, previous) > self.threshold
-        inside = np.zeros_like(mask)
-        sx = 160 / (gray.shape[1] / FLOW_SCALE)
-        sy = 90 / (gray.shape[0] / FLOW_SCALE)
-        for x1, y1, x2, y2 in boxes:
-            mx, my = (x2 - x1) * self.margin, (y2 - y1) * self.margin
-            inside[max(0, int((y1 - my) * sy)):int((y2 + my) * sy) + 1,
-                   max(0, int((x1 - mx) * sx)):int((x2 + mx) * sx) + 1] = True
-        minimum = self.min_fraction * mask.size
-        outside_count = int((mask & ~inside).sum())
-        inside_count = int((mask & inside).sum())
-        return outside_count >= minimum, inside_count >= minimum / 2
-
-
-# --- trayectorias -----------------------------------------------------------
 
 @dataclass
 class PersonTrack:
@@ -327,33 +65,11 @@ def match_score(track_box: Box, detection: Box, match_iou: float,
     overlap = iou(track_box, detection)
     if overlap >= match_iou:
         return 1.0 + overlap
-    tx, ty = _center(track_box)
-    dx, dy = _center(detection)
-    size = max(*_size(track_box))
-    distance = float(np.hypot(tx - dx, ty - dy)) / size
+    tx, ty = center(track_box)
+    dx, dy = center(detection)
+    box_size = max(*size(track_box))
+    distance = float(np.hypot(tx - dx, ty - dy)) / box_size
     return max(0.0, 1.0 - distance / center_gate) if distance < center_gate else 0.0
-
-
-def assign(score: np.ndarray) -> list[tuple[int, int]]:
-    """Asignación óptima (húngara) que maximiza la afinidad total."""
-    if score.size == 0:
-        return []
-    try:
-        from scipy.optimize import linear_sum_assignment
-    except ImportError:                       # respaldo: voraz por afinidad
-        pairs, used_rows, used_cols = [], set(), set()
-        for flat in np.argsort(-score, axis=None):
-            row, col = np.unravel_index(flat, score.shape)
-            if score[row, col] <= 0:
-                break
-            if row in used_rows or col in used_cols:
-                continue
-            used_rows.add(row)
-            used_cols.add(col)
-            pairs.append((int(row), int(col)))
-        return pairs
-    rows, cols = linear_sum_assignment(-score)
-    return [(int(r), int(c)) for r, c in zip(rows, cols) if score[r, c] > 0]
 
 
 class TrackManager:
@@ -383,8 +99,11 @@ class TrackManager:
     def __init__(self, camera: str, match_iou: float = 0.25, center_gate: float = 0.75,
                  max_misses: int = 2, forget_seconds: float = 2.0,
                  grace_seconds: float = 10.0, hidden_seconds: float = 120.0,
-                 edge_margin: float = 0.08) -> None:
+                 edge_margin: float = 0.08,
+                 appearance: AppearanceModel | None = None) -> None:
         self.camera = camera
+        # Identidad corporal intercambiable: color del torso hoy, Re-ID mañana.
+        self.appearance: AppearanceModel = appearance or ColorHistogramAppearance()
         self.alias = camera_alias(camera)
         self.match_iou = match_iou
         self.center_gate = center_gate
@@ -486,7 +205,7 @@ class TrackManager:
         geometric = match_score(self._expected_box(track, now), box, self.match_iou, gate)
         if geometric <= 0:
             return 0.0
-        similarity = appearance_similarity(track.signature, signature)
+        similarity = self.appearance.similarity(track.signature, signature)
         if similarity is None:
             return geometric
         if (ambiguous and similarity < self.APPEARANCE_VETO
@@ -516,7 +235,7 @@ class TrackManager:
             # Reaparición (estilo OC-SORT): la velocidad se reestima con la
             # última observación, no con la predicción acumulada a ciegas.
             dt = now - track.last_seen
-            (lx, ly), (nx, ny) = _center(track.box), _center(box)
+            (lx, ly), (nx, ny) = center(track.box), center(box)
             track.model = MotionModel(box, now)
             track.model.x[2:] = [(nx - lx) / dt * 0.5, (ny - ly) / dt * 0.5]
         else:
@@ -530,7 +249,7 @@ class TrackManager:
         track.last_seen_wall = wall
         track.yolo_hits += 1
         track.misses = 0
-        track.signature = blend_signature(track.signature, signature)
+        track.signature = self.appearance.blend(track.signature, signature)
         track.flow = FlowTracker(gray, box) if gray is not None else None
 
     def apply_detections(self, gray: np.ndarray | None, boxes: list[Box],
@@ -543,7 +262,7 @@ class TrackManager:
         """Actualiza con una ejecución de YOLO. Devuelve (nuevas, terminadas)."""
         weak_boxes = weak_boxes or []
         weak_confidences = weak_confidences or []
-        signatures = [color_signature(frame, box) for box in boxes]
+        signatures = [self.appearance.signature(frame, box) for box in boxes]
         self.last_recovered = []
         matched: set[str] = set()
         remaining = list(range(len(boxes)))
@@ -573,7 +292,7 @@ class TrackManager:
         # 3b. Ocultas en el interior que reaparecen lejos: solo por apariencia.
         for d in list(remaining):
             candidates = sorted(
-                ((appearance_similarity(track.signature, signatures[d]) or 0.0, i)
+                ((self.appearance.similarity(track.signature, signatures[d]) or 0.0, i)
                  for i, track in enumerate(self.hidden())), reverse=True)
             if not candidates or candidates[0][0] < self.APPEARANCE_RECOVERY:
                 continue
@@ -597,10 +316,10 @@ class TrackManager:
                     + self.grace)
             options = []
             for track in pool:
-                similarity = appearance_similarity(track.signature, signatures[d])
+                similarity = self.appearance.similarity(track.signature, signatures[d])
                 if similarity is not None and similarity < self.APPEARANCE_VETO:
                     continue
-                (tx, ty), (dx, dy) = _center(self._expected_box(track, now)), _center(boxes[d])
+                (tx, ty), (dx, dy) = center(self._expected_box(track, now)), center(boxes[d])
                 options.append((float(np.hypot(tx - dx, ty - dy)), track))
             if not options:
                 continue
@@ -668,35 +387,3 @@ class TrackManager:
             if track.exit_kind is None:
                 track.exit_kind = "sesion"
         return ended
-
-
-def yolo_reason(*, now: float, last_yolo: float, verdict_pending: bool,
-                alarm_pending: bool, alarm_active: bool, has_tracks: bool,
-                searching: bool = False,
-                motion_outside: bool, track_lost: bool, tracks_moving: bool,
-                confirm_interval: float = 0.2, trigger_interval: float = 0.5,
-                moving_interval: float = 1.0, still_interval: float = 3.0,
-                watch_interval: float = 1.0) -> str | None:
-    """Decide si este fotograma necesita YOLO y por qué (None: basta el flujo).
-
-    ``trigger_interval`` limita los disparos por movimiento o trayectoria
-    perdida: una cortina que se mueve sin parar no debe ejecutar YOLO en cada
-    fotograma. Es también la demora máxima para detectar a una persona nueva.
-    """
-    elapsed = now - last_yolo
-    if alarm_pending:
-        return REASON_ALARM
-    if verdict_pending:
-        return REASON_CONFIRM if elapsed >= confirm_interval else None
-    if motion_outside and elapsed >= trigger_interval:
-        return REASON_MOTION
-    if track_lost and elapsed >= trigger_interval:
-        return REASON_LOST
-    if has_tracks:
-        limit = moving_interval if tracks_moving else still_interval
-        return REASON_INTERVAL if elapsed >= limit else None
-    if alarm_active and elapsed >= watch_interval:
-        return REASON_WATCH
-    if searching and elapsed >= still_interval:
-        return REASON_WATCH       # personas en gracia u ocultas: buscarlas
-    return None

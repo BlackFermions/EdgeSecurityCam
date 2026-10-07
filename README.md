@@ -293,28 +293,71 @@ ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
    a la trayectoria.
 3. **Modelo en ONNX sin PyTorch** para bajar la RAM en hardware edge.
 
+## Arquitectura modular
+
+Cada módulo tiene una interfaz fija y se puede mejorar o reemplazar por
+dentro sin tocar los demás:
+
+```
+ FUENTES (sources)           PERCEPCIÓN                                    SALIDAS
+┌──────────────────┐  ┌────────────┐  ┌────────────┐  ┌─────────────┐   ┌────────────────┐
+│ camera_events    │─►│ detection  │─►│ tracking   │─►│ identity    │   │ storage        │
+│ (alarma ONVIF)   │  │ (YOLO)     │  │ (flujo,    │  │ (color del  │   │ (SQLite)       │
+│ camera_config    │  └────────────┘  │  Kalman,   │  │  torso →    │   ├────────────────┤
+│ video, snapshot  │        ▲         │  húngaro)  │  │  Re-ID)     │   │ outputs        │
+└──────────────────┘        │         └────────────┘  └─────────────┘   │ (foto, --ver)  │
+                    ┌───────┴──────────────────────┐  ┌─────────────┐   ├────────────────┤
+                    │ analysis: política de YOLO,  │  │ faces       │   │ (futuro: NOC,  │
+                    │ veredicto, sesión, reposo    │  │ (próximo)   │   │  voz, luces)   │
+                    └──────────────────────────────┘  └─────────────┘   └────────────────┘
+                                     node.py une los módulos
+```
+
+| Módulo | Interfaz | Implementación actual | Reemplazo previsto |
+|---|---|---|---|
+| `detection` | `PersonDetector.detect(frame) → FrameResult` | `YoloPersonDetector` (YOLO26n, PyTorch) | ONNX sin PyTorch, NPU |
+| `identity` | `AppearanceModel.signature / similarity / blend` | `ColorHistogramAppearance` | Re-ID (p. ej. OSNet) |
+| `tracking` | `TrackManager.flow_step / apply_detections` | flujo LK + Kalman + húngaro | — |
+| `analysis` | `yolo_reason`, `VerificationTracker`, `AnalysisManager` | reglas actuales | — |
+| `faces` | (por definir) | — | YuNet + SFace |
+
 ## Estructura
 
 ```
-escuchar_alarmas.py      punto de entrada (argumentos, registro, arranque)
-instalar.bat             crea .venv, instala dependencias y descarga el modelo
-ejecutar.bat             inicia el nodo con registro en logs/
+escuchar_alarmas.py          punto de entrada (argumentos, registro, arranque)
+instalar.bat / ejecutar.bat  instalación y arranque en Windows
 requirements.txt
-claves.example.txt       plantilla de credenciales (claves.txt no se versiona)
-src/node.py              servicio del nodo: une configuración, alarmas, análisis y base
-src/camera_events.py     suscripción ONVIF, parseo e inicio/fin de alarmas
-src/camera_config.py     lectura, huella y cambios de la configuración
-src/camera_web.py        acceso de solo lectura a la web de la cámara
-src/analysis.py          sesión de análisis por cámara: verificación + seguimiento
-src/tracking.py          flujo óptico, puerta de movimiento, trayectorias y salvaguardas
-src/person_verifier.py   detector YOLO y veredicto de cada alarma
-src/idle_check.py        verificación periódica en reposo (foto ONVIF o RTSP)
-src/storage.py           base SQLite del nodo
-src/discovery.py         búsqueda de la cámara por MAC (WS-Discovery)
-src/config.py            credenciales
-tools/resumen.py         resumen de la base para calibrar
-tools/sondear_eventos.py diagnóstico de la cámara
-tests/                   pruebas: python -m unittest discover -s tests -t .
+claves.example.txt           plantilla de credenciales (claves.txt no se versiona)
+src/node.py                  servicio del nodo: une los módulos
+src/credentials.py           credenciales de la cámara
+src/sources/                 1-2 · entradas
+    camera_events.py           suscripción ONVIF e inicio/fin de alarmas
+    camera_config.py           lectura, huella y cambios de configuración
+    camera_web.py              web de la cámara (solo lectura)
+    discovery.py               búsqueda de la cámara por MAC
+    video.py                   URL y apertura del RTSP
+    snapshot.py                fotograma suelto (foto ONVIF o RTSP)
+src/detection/               3 · detector de personas
+    base.py                    interfaz PersonDetector y FrameResult
+    yolo.py                    YoloPersonDetector
+src/tracking/                4 · seguimiento clásico
+    geometry.py, flow.py, kalman.py, gate.py, assignment.py, manager.py
+src/identity/                5 · identidad corporal
+    base.py                    interfaz AppearanceModel
+    color.py                   histograma de color del torso
+src/faces/                   6-7 · rostro (próxima etapa)
+src/analysis/                8 · decisiones
+    policy.py                  cuándo y por qué ejecutar YOLO (salvaguardas)
+    verdict.py                 veredicto de cada alarma
+    session.py                 sesión de análisis por cámara
+    idle.py                    verificación periódica en reposo
+src/storage/                 9 · base SQLite del nodo
+src/outputs/                 12 · salidas
+    annotate.py                cajas sobre las fotos
+    viewer.py                  ventana --ver
+tools/resumen.py             resumen de la base para calibrar
+tools/sondear_eventos.py     diagnóstico de la cámara
+tests/                       pruebas: python -m unittest discover -s tests -t .
 data/ logs/ capturas/ models/   datos locales (no se versionan)
 ```
 

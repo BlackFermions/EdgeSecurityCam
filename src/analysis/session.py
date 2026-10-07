@@ -12,7 +12,6 @@ activa o haya personas seguidas. Durante la sesión:
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 import uuid
@@ -25,15 +24,13 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from src.person_verifier import (
-    FrameResult,
-    PersonDetector,
-    VerificationSummary,
-    VerificationTracker,
-    annotate,
-)
-from src.tracking import FLOW_SCALE, MotionGate, PersonTrack, TrackManager, yolo_reason
-from src.viewer import draw_overlay
+from src.analysis.policy import yolo_reason
+from src.analysis.verdict import VerificationSummary, VerificationTracker
+from src.detection.base import FrameResult, PersonDetector
+from src.outputs.annotate import annotate
+from src.sources.video import open_rtsp
+from src.tracking import FLOW_SCALE, MotionGate, PersonTrack, TrackManager
+from src.outputs.viewer import draw_overlay
 
 
 PROCESS_INTERVAL = 0.1          # ~10 fotogramas por segundo para flujo y puerta
@@ -166,12 +163,8 @@ class AnalysisSession(threading.Thread):
                 if verdict is not None:
                     self._cb.on_verdict(verdict, tracker.summary)
 
-        os.environ.setdefault(
-            "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-            "rtsp_transport;tcp|stimeout;5000000|rw_timeout;5000000",
-        )
         take_pending()
-        capture = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+        capture = open_rtsp(self._url)
         if not capture.isOpened():
             capture.release()
             self.stats.error = "no se pudo abrir el vídeo RTSP"

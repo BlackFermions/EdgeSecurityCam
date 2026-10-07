@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.camera_events import CameraAlarm
+from src.sources.camera_events import CameraAlarm
 from src.node import CamDetectorNode
 from src.storage import NodeStore
 
@@ -113,8 +113,8 @@ class SessionSummaryTests(unittest.TestCase):
 
 class ConfigRecoveryTests(unittest.TestCase):
     def test_web_failure_is_reported_once_and_recovery_with_duration(self):
-        from src.camera_config import ConfigWatcher
-        from src.camera_web import CameraWebError
+        from src.sources.camera_config import ConfigWatcher
+        from src.sources.camera_web import CameraWebError
 
         class FlakyWeb:
             failing = True

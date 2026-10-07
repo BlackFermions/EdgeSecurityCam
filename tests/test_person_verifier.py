@@ -1,6 +1,8 @@
 import unittest
 
-from src.person_verifier import FrameResult, VerificationTracker, rtsp_url
+from src.analysis.verdict import VerificationTracker
+from src.detection.base import FrameResult
+from src.sources.video import rtsp_url
 
 
 def frame(at, *confidences):

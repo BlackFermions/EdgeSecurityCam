@@ -5,22 +5,24 @@ from pathlib import Path
 
 import numpy as np
 
-from src.analysis import SessionStats
+from src.analysis.session import SessionStats
 from src.storage import NodeStore
-from src.tracking import (
-    FLOW_SCALE,
+from src.analysis.policy import (
     REASON_ALARM,
     REASON_CONFIRM,
     REASON_INTERVAL,
     REASON_LOST,
     REASON_MOTION,
     REASON_WATCH,
+    yolo_reason,
+)
+from src.tracking import (
+    FLOW_SCALE,
     FlowTracker,
     MotionGate,
     TrackManager,
     camera_alias,
     iou,
-    yolo_reason,
 )
 
 

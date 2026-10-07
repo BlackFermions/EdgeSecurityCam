@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.camera_config import config_hash, diff_config
+from src.sources.camera_config import config_hash, diff_config
 from src.storage import NodeStore
 
 

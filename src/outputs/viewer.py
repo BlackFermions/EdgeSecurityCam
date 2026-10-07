@@ -12,13 +12,14 @@ OpenCV no dibuja acentos: los textos sobre la imagen van sin tildes.
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 from datetime import datetime
 
 import cv2
 import numpy as np
+
+from src.sources.video import open_rtsp
 
 
 GREEN = (60, 210, 60)        # posición corregida por YOLO en este fotograma
@@ -90,12 +91,8 @@ class CameraPreview(threading.Thread):
             return self._frame
 
     def run(self) -> None:
-        os.environ.setdefault(
-            "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-            "rtsp_transport;tcp|stimeout;5000000|rw_timeout;5000000",
-        )
         while not self._halt.is_set():
-            capture = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+            capture = open_rtsp(self._url)
             while not self._halt.is_set() and capture.isOpened():
                 ok, frame = capture.read()
                 if not ok or frame is None:

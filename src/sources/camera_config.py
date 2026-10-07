@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from src.camera_web import CameraWeb, CameraWebError
+from src.sources.camera_web import CameraWeb, CameraWebError
 
 
 DETECTION_KEYS = ("enable", "sensitivity", "threshold", "duration", "show_human",

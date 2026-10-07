@@ -8,14 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.camera_config import ConfigWatcher, config_hash, diff_config, summarize
-from src.camera_events import (
+from src.sources.camera_config import ConfigWatcher, config_hash, diff_config, summarize
+from src.sources.camera_events import (
     AlarmStateTracker,
     CameraAlarm,
     CameraEventListener,
     OnvifEventClient,
 )
-from src.camera_web import CameraWeb
+from src.sources.camera_web import CameraWeb
 from src.storage import NodeStore
 
 
@@ -68,7 +68,7 @@ class CamDetectorNode:
         # fotogramas por cámara.
         self.idle_checkers = []
         if verifier is not None and idle_sources and idle_interval > 0:
-            from src.idle_check import IdleChecker
+            from src.analysis.idle import IdleChecker
             self.idle_checkers = [
                 IdleChecker(host, idle_sources[host], verifier.detector,
                             verifier.has_session, self._on_idle_person,

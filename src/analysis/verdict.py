@@ -1,38 +1,11 @@
-"""Detector YOLO de personas y veredicto de cada alarma.
-
-El uso del detector durante una alarma (sesión, seguimiento y salvaguardas)
-está en ``src.analysis``.
-"""
+"""Veredicto de cada alarma: persona confirmada o descartada."""
 
 from __future__ import annotations
 
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
 
-import cv2
-import numpy as np
-
-
-PERSON_CLASS = 0
-SUB_STREAM_PATH = "/stream2"
-
-
-@dataclass(frozen=True)
-class FrameResult:
-    at: float                                       # time.monotonic()
-    confidences: tuple[float, ...]                  # detecciones fuertes
-    boxes: tuple[tuple[int, int, int, int], ...]
-    # Detecciones débiles: solo mantienen viva una trayectoria existente;
-    # nunca crean personas ni cuentan para el veredicto (idea de ByteTrack).
-    weak_confidences: tuple[float, ...] = ()
-    weak_boxes: tuple[tuple[int, int, int, int], ...] = ()
-
-    @property
-    def people(self) -> int:
-        return len(self.confidences)
+from src.detection.base import FrameResult
 
 
 @dataclass
@@ -101,52 +74,3 @@ class VerificationTracker:
             self.best_frame_key = key
             return True
         return False
-
-
-class PersonDetector:
-    """YOLO restringido a la clase persona; se carga y precalienta una vez."""
-
-    def __init__(self, model: str, confidence: float = 0.40,
-                 image_size: int = 640, device: str = "cpu",
-                 weak_confidence: float = 0.15) -> None:
-        from ultralytics import YOLO  # import diferido: es pesado
-
-        self._model = YOLO(model)
-        self._confidence = confidence
-        self._weak_confidence = min(weak_confidence, confidence)
-        self._image_size = image_size
-        self._device = device
-        self._lock = threading.Lock()
-        self.detect(np.zeros((image_size, image_size, 3), dtype=np.uint8))
-
-    def detect(self, frame: np.ndarray) -> FrameResult:
-        with self._lock:
-            prediction = self._model.predict(
-                frame, conf=self._weak_confidence, imgsz=self._image_size,
-                classes=[PERSON_CLASS], device=self._device, verbose=False,
-            )[0]
-        strong: list[tuple[float, tuple[int, int, int, int]]] = []
-        weak: list[tuple[float, tuple[int, int, int, int]]] = []
-        for box in prediction.boxes:
-            confidence = float(box.conf[0].item())
-            x1, y1, x2, y2 = (int(value) for value in box.xyxy[0].tolist())
-            (strong if confidence >= self._confidence else weak).append(
-                (confidence, (x1, y1, x2, y2)))
-        return FrameResult(time.monotonic(),
-                           tuple(c for c, _ in strong), tuple(b for _, b in strong),
-                           tuple(c for c, _ in weak), tuple(b for _, b in weak))
-
-
-def rtsp_url(host: str, username: str, password: str, port: int = 554,
-             path: str = SUB_STREAM_PATH) -> str:
-    return (f"rtsp://{quote(username, safe='')}:{quote(password, safe='')}"
-            f"@{host}:{port}{path}")
-
-
-def annotate(frame: np.ndarray, result: FrameResult) -> np.ndarray:
-    image = frame.copy()
-    for (x1, y1, x2, y2), confidence in zip(result.boxes, result.confidences):
-        cv2.rectangle(image, (x1, y1), (x2, y2), (50, 220, 70), 2)
-        cv2.putText(image, f"persona {confidence:.0%}", (x1, max(18, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (50, 220, 70), 2)
-    return image
