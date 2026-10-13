@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from src.storage import NodeStore
+from src.storage.node_store import SCHEMA_VERSION
 from src.analysis.policy import REASON_CONFIRM, REASON_WATCH
 from src.identity.color import appearance_similarity, color_signature
 from src.tracking import FLOW_SCALE, FlowTracker, MotionModel, TrackManager, assign
@@ -155,7 +156,9 @@ class MigrationTests(unittest.TestCase):
             store = NodeStore(path)
             columns = {row[1] for row in store.query("PRAGMA table_info(persona_track)")}
             self.assertIn("recuperaciones_apariencia", columns)
-            self.assertEqual(store.query("PRAGMA user_version")[0][0], 3)
+            self.assertEqual(store.query("PRAGMA user_version")[0][0], SCHEMA_VERSION)
+            face_columns = {"etiqueta", "identidad", "estado_rostro", "intentos_rostro"}
+            self.assertTrue(face_columns <= columns)
             store.close()
 
 

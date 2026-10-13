@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
+
+import cv2
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -76,7 +78,7 @@ class CamDetectorNode:
                           for host in hosts]
         if verifier is not None:
             verifier.set_callbacks(self._on_verdict, self._on_verification_finished,
-                                   self._on_track, self._on_session)
+                                   self._on_track, self._on_session, self._on_face_attempt)
         # Verificación en reposo: solo con YOLO disponible y una fuente de
         # fotogramas por cámara.
         self.idle_checkers = []
@@ -306,6 +308,20 @@ class CamDetectorNode:
     # --- seguimiento corporal --------------------------------------------------
 
     def _on_track(self, event: str, track, note: str | None) -> None:
+        if event == "identified":
+            log.info("[%s]     persona %s = %s (similitud %.2f · %d intento(s) de rostro)",
+                     track.camera, track.code, track.identity, track.face_score,
+                     track.face_attempts)
+            if self.store is not None:
+                self.store.track_face(track)
+            return
+        if event == "unknown":
+            log.info("[%s]     persona %s = %s · DESCONOCIDA (no está en la galería; mejor "
+                     "similitud %.2f en %d intento(s))", track.camera, track.code,
+                     track.label or track.code, track.face_score, track.face_attempts)
+            if self.store is not None:
+                self.store.track_face(track)
+            return
         if event == "recovered":
             how, unseen = (note or "posicion:0").split(":")
             log.info("[%s]     persona %s reapareció tras %s s sin verse (por %s)",
@@ -314,8 +330,9 @@ class CamDetectorNode:
                 self.store.track_recovered(track)
             return
         if event == "entered":
-            log.info("[%s]     persona %s entró (confianza %.2f · YOLO por %s)",
-                     track.camera, track.code, track.confidence, track.reason)
+            log.info("[%s]     persona %s entró%s (confianza %.2f · YOLO por %s)",
+                     track.camera, track.code, f" como {track.label}" if track.label else "",
+                     track.confidence, track.reason)
             if self.store is not None:
                 self.store.track_entered(track)
             return
@@ -328,11 +345,36 @@ class CamDetectorNode:
             description = f"dejó de seguirse: {note}"
         else:
             note = description
-        log.info("[%s]     persona %s %s (%.1f s visible · %d detecciones YOLO)",
-                 track.camera, track.code, description, track.visible_seconds,
+        who = f" ({track.identity or track.label})" if (track.identity or track.label) else ""
+        log.info("[%s]     persona %s%s %s (%.1f s visible · %d detecciones YOLO)",
+                 track.camera, track.code, who, description, track.visible_seconds,
                  track.yolo_hits)
         if self.store is not None:
             self.store.track_left(track, note)
+            if track.face_attempts:
+                self.store.track_face(track)
+
+    def _on_face_attempt(self, track, attempt, hd_ms: float) -> None:
+        match = attempt.match
+        detail = (f"{match.best} {match.score:.2f} / {match.second} {match.second_score:.2f}"
+                  if match else ", ".join(attempt.problems) or f"{attempt.faces_in_band} cara(s)")
+        log.debug("[%s]       rostro %s: %s (%s) · HD %.0f ms · rostro %.0f ms",
+                  track.camera, track.code, attempt.result, detail, hd_ms, attempt.elapsed_ms)
+        crop = None
+        settings = self.settings.get(track.camera)
+        if (attempt.crop is not None and self.base_dir is not None and settings is not None
+                and settings.get("rostro", "guardar_recortes")):
+            now = datetime.now()
+            folder = self.base_dir / "capturas" / "rostros" / now.strftime("%Y-%m-%d")
+            name = f"{now:%H%M%S_%f}_{track.code}_{attempt.result}.jpg"
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                if cv2.imwrite(str(folder / name), attempt.crop):
+                    crop = self._relative(folder / name)
+            except (OSError, cv2.error):
+                crop = None
+        if self.store is not None:
+            self.store.face_attempt(track, attempt, hd_ms, crop)
 
     def _on_session(self, stats) -> None:
         reasons = ", ".join(f"{name} {count}" for name, count in stats.reasons.most_common())
@@ -346,6 +388,11 @@ class CamDetectorNode:
         log.info("[%s]     eficiencia: %d fotogramas · %d YOLO (%.0f%% sin YOLO) · "
                  "motivos: %s", stats.camera, stats.frames, stats.yolo_runs,
                  stats.savings * 100, reasons or "-")
+        if getattr(stats, "face_attempts", 0) or getattr(stats, "face_grabs", 0):
+            log.info("[%s]     rostro: %d ráfaga(s) HD · %d intento(s) · %d comparado(s) con "
+                     "la galería · %d identificada(s) · %d desconocida(s)", stats.camera,
+                     stats.face_grabs, stats.face_attempts, stats.face_compared,
+                     stats.identified, stats.unknown)
         if self.store is not None:
             self.store.session_finished(stats)
 

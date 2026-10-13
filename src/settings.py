@@ -87,6 +87,37 @@ SCHEMA: dict[str, dict[str, Param]] = {
         "procesar_cada_s": Param(0.1, 0.03, 1.0, "s", "Intervalo de procesamiento (flujo óptico y puerta)."),
         "max_s": Param(900.0, 30, 7200, "s", "Duración máxima de una sesión de análisis."),
     },
+    "rostro": {
+        "activo": Param(False, description="Reconocimiento facial (requiere galería). Apagado hasta calibrar cada cámara."),
+        "galeria": Param("face_gallery", description="Carpeta de la galería: una subcarpeta con fotos por persona (relativa a CamDetector).",
+                         unit="ruta"),
+        "hd_ruta": Param("/stream1", description="Ruta RTSP del vídeo principal (HD) del que se toma la cara.", unit="ruta",
+                         calibrate="La foto ONVIF de la W51-TY es solo 640x360: la cara sale del vídeo HD en ráfagas."),
+        "franja_cabeza": Param(0.30, 0.1, 1.0, "fracción", "Parte superior de la caja de la persona donde se busca la cara.",
+                               calibrate="¿Caen dentro las caras de personas sentadas y de pie? (F1: sí en HD)."),
+        "franja_min_ancho": Param(0.50, 0.0, 2.0, "fracción del ancho",
+                                  "Altura mínima de la franja de la cabeza respecto al ancho de la persona (sentados o cortados por el borde)."),
+        "yunet_puntuacion": Param(0.80, 0.3, 0.99, "", "Confianza mínima de YuNet para aceptar una cara.",
+                                  calibrate="Bajar si se pierden caras inclinadas; vigilar caras falsas en rostro_intento."),
+        "cara_min_px": Param(48, 16, 400, "px", "Ancho mínimo de la cara (en HD) para intentar reconocerla.",
+                             calibrate="Desde qué tamaño la similitud de una misma persona se mantiene alta."),
+        "frontal_min": Param(0.50, 0.0, 1.0, "", "Frontalidad mínima (1 = de frente) según la simetría de ojos y nariz."),
+        "nitidez_min": Param(20.0, 0, 10000, "var. Laplaciano", "Nitidez mínima de la cara (descarta movidas o desenfocadas)."),
+        "brillo_min": Param(40.0, 0, 255, "nivel medio", "Brillo medio mínimo de la cara (descarta caras en oscuridad)."),
+        "umbral": Param(0.45, 0.1, 0.95, "similitud", "Similitud mínima con la galería para dar un nombre.",
+                        calibrate="Distribución misma persona frente a distinta (F1: Brayan 0,43 con galería de webcam, desconocidos 0,22–0,24)."),
+        "margen_segundo": Param(0.08, 0.0, 0.5, "similitud", "Diferencia mínima con la segunda persona más parecida."),
+        "votos": Param(2, 1, 10, "coincidencias", "Coincidencias con la misma persona para identificar."),
+        "intentos_max": Param(5, 1, 50, "intentos", "Intentos con cara válida sin coincidencia antes de marcar 'desconocida'."),
+        "espera_entre_intentos_s": Param(1.5, 0.2, 60, "s", "Tiempo mínimo entre intentos para la misma persona."),
+        "espera_max_s": Param(30.0, 1, 600, "s",
+                              "Sin cara (de espaldas, mirando abajo) la espera se duplica en cada intento hasta este máximo: evita abrir el vídeo HD sin parar.",
+                              calibrate="Cada ráfaga HD cuesta ~0,4 s de CPU: subir si las personas pasan mucho tiempo sin mirar a la cámara."),
+        "reverificar_cada_s": Param(60.0, 5, 3600, "s", "Volver a verificar a una persona identificada."),
+        "persona_min_alto_px": Param(60, 10, 1000, "px", "Altura mínima de la persona en el substream para intentar (lejos = sin cara útil)."),
+        "presupuesto_sface_s": Param(3.0, 0.2, 50, "por segundo", "Máximo de reconocimientos SFace por segundo en la cámara."),
+        "guardar_recortes": Param(True, description="Guardar el recorte de cada cara intentada (capturas/rostros) para calibrar."),
+    },
     "reposo": {
         "cada_s": Param(10.0, 0, 600, "s", "Verificación en reposo: un fotograma cada N s aunque la cámara no avise (0 = desactivada)."),
         "confianza_min": Param(0.50, 0.05, 0.95, "", "Confianza de YOLO para abrir sesión desde reposo."),
@@ -109,7 +140,15 @@ def _validate(group: str, name: str, value: Any) -> Any:
         if value not in spec.choices:
             raise SettingsError(f"{group}.{name} = {value!r}: debe ser uno de {spec.choices}")
         return value
-    if isinstance(spec.default, bool) or not isinstance(value, (int, float)) or isinstance(value, bool):
+    if isinstance(spec.default, bool):
+        if not isinstance(value, bool):
+            raise SettingsError(f"{group}.{name} = {value!r}: debe ser true o false")
+        return value
+    if isinstance(spec.default, str):
+        if not isinstance(value, str) or not value.strip():
+            raise SettingsError(f"{group}.{name} = {value!r}: debe ser un texto no vacío")
+        return value
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise SettingsError(f"{group}.{name} = {value!r}: debe ser un número")
     if isinstance(spec.default, int) and not float(value).is_integer():
         raise SettingsError(f"{group}.{name} = {value!r}: debe ser entero")
@@ -195,6 +234,16 @@ def load_settings(path: Path | None, cameras: list[str],
     return result
 
 
+def _span(spec: Param) -> str:
+    if spec.choices is not None:
+        return " / ".join(str(choice) for choice in spec.choices)
+    if isinstance(spec.default, bool):
+        return "true / false"
+    if isinstance(spec.default, str):
+        return "texto"
+    return f"{spec.minimum}–{spec.maximum}"
+
+
 def markdown_table() -> str:
     """Documentación de todos los parámetros (docs/parametros.md)."""
     lines = []
@@ -203,10 +252,7 @@ def markdown_table() -> str:
         lines.append("| Parámetro | Defecto | Rango | Unidad | Qué hace | Cómo calibrar |")
         lines.append("|---|---|---|---|---|---|")
         for name, spec in params.items():
-            if spec.choices is not None:
-                span = " / ".join(str(choice) for choice in spec.choices)
-            else:
-                span = f"{spec.minimum}–{spec.maximum}"
+            span = _span(spec)
             lines.append(f"| `{name}` | {spec.default} | {span} | {spec.unit} | "
                          f"{spec.description} | {spec.calibrate} |")
     return "\n".join(lines) + "\n"

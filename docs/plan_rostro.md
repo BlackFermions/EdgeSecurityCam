@@ -27,13 +27,33 @@ desconocidos 0,22–0,24 (rechazados).
 | Paso | Contenido | Estado |
 |---|---|---|
 | 0 | Parámetros por cámara (`config/camdetector.toml`, `docs/parametros.md`) | ✅ hecho 2026-10-13 |
-| 1 | `faces/`: interfaz `FaceDetector`, YuNet, calidad de la cara (tamaño, frontalidad, nitidez, brillo) + `tools/rostros.py medir` | pendiente |
-| 2 | Cara desde la foto HD (perfil HD, coordenadas, recorte de la franja) + puerta YuNet en el substream + `tools/rostros.py hd` | pendiente |
-| 3 | `FaceRecognizer` (SFace) + galería con varias huellas por persona y caché + `tools/galeria.py` | pendiente |
-| 4 | Planificador del rostro (`analysis/face_policy.py`): estados, votos, desconocida, presupuesto, unión de cajas (regla del 70 %) | pendiente |
-| 5 | Integración: trabajador aparte, base v4 (`rostro_intento`, identidad en `persona_track`), registro, `--ver` | pendiente |
+| 1 | `faces/`: interfaz `FaceDetector`, YuNet, calidad de la cara (tamaño, frontalidad, nitidez, brillo) | ✅ hecho 2026-10-13 (herramienta `tools/rostros.py`: pendiente) |
+| 2 | Cara en HD: `sources/hd.py` (ráfaga del vídeo principal), coordenadas substream→HD, franja de la cabeza | ✅ hecho 2026-10-13 (puerta YuNet en el substream: pendiente) |
+| 3 | `FaceRecognizer` (SFace) + galería con varias huellas por persona (+ promedio) y caché | ✅ hecho 2026-10-13 (herramienta `tools/galeria.py`: pendiente) |
+| 4 | Planificador del rostro (`analysis/face_policy.py`): estados, votos, desconocida, espera creciente sin cara, reverificación | ✅ hecho 2026-10-13 (regla del 70 % para cajas unidas: pendiente; 2 caras en la franja ya se marcan como unión) |
+| 5 | Integración: trabajador aparte (`analysis/face_worker.py`), base v4 (`rostro_intento`, identidad en `persona_track`), registro, `--ver` | ✅ hecho 2026-10-13 |
 | 6 | Galería con capturas HD de esta cámara (día e IR) | pendiente |
 | 7 | Calibración del umbral por cámara (`tools/calibrar_rostro.py`) | pendiente |
+
+## Hallazgos del 2026-10-13 (pasos 1–5)
+
+- **La foto ONVIF de la W51-TY es solo 640×360** en todos los perfiles y su
+  resolución no se puede cambiar (`snapshot_res`: `res_cnt = 0`). La cara se
+  toma del vídeo principal `/stream1` (2880×1616) en **ráfagas**: ~1,1 s hasta
+  el primer fotograma y ~0,35 s de CPU; tenerlo abierto costaría ~91 % de un
+  núcleo.
+- **Una ráfaga sirve a todas las personas pendientes** (una apertura del HD por
+  turno, no una por persona).
+- En la sala de reuniones la gente **casi nunca mira a la cámara** (de
+  espaldas, mirando la laptop o el celular): la mayoría de intentos son
+  `sin_cara`. Por eso **la espera entre intentos se duplica sin cara** (1,5 →
+  3 → 6 … hasta 30 s): antes se abría el HD cada ~3 s sin parar.
+- **Franja de la cabeza en personas sentadas o cortadas por el borde:** el
+  30 % del alto quedaba por debajo de los ojos; ahora la franja mide al menos
+  el 50 % del ancho de la persona (`franja_min_ancho`).
+- **Primera identificación en vivo:** Brayan, similitud 0,61, en 9 intentos
+  (3 coincidencias, 3 bajo umbral, 2 de mala calidad, 6 sin cara en total en
+  la sesión). Ráfaga HD ~1,1 s; análisis del rostro 23–68 ms.
 
 ## Reglas acordadas
 

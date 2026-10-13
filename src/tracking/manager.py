@@ -49,6 +49,16 @@ class PersonTrack:
     signature: np.ndarray | None = None
     recoveries: int = 0
     recoveries_by_appearance: int = 0
+    # Rostro: etiqueta visible ("Persona N" o el nombre), identidad y estado.
+    label: str | None = None
+    identity: str | None = None
+    face_status: str | None = None
+    face_score: float = 0.0
+    face_attempts: int = 0
+
+    @property
+    def display_name(self) -> str:
+        return self.identity or self.label or self.code
 
     @property
     def visible_seconds(self) -> float:

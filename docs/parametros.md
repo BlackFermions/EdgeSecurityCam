@@ -107,6 +107,31 @@ flujo óptico) no se exponen: dependen del algoritmo, no de la cámara.
 | `procesar_cada_s` | 0.1 | 0.03–1.0 | s | Intervalo de procesamiento (flujo óptico y puerta). |  |
 | `max_s` | 900.0 | 30–7200 | s | Duración máxima de una sesión de análisis. |  |
 
+### `[rostro]`
+
+| Parámetro | Defecto | Rango | Unidad | Qué hace | Cómo calibrar |
+|---|---|---|---|---|---|
+| `activo` | False | true / false |  | Reconocimiento facial (requiere galería). Apagado hasta calibrar cada cámara. |  |
+| `galeria` | face_gallery | texto | ruta | Carpeta de la galería: una subcarpeta con fotos por persona (relativa a CamDetector). |  |
+| `hd_ruta` | /stream1 | texto | ruta | Ruta RTSP del vídeo principal (HD) del que se toma la cara. | La foto ONVIF de la W51-TY es solo 640x360: la cara sale del vídeo HD en ráfagas. |
+| `franja_cabeza` | 0.3 | 0.1–1.0 | fracción | Parte superior de la caja de la persona donde se busca la cara. | ¿Caen dentro las caras de personas sentadas y de pie? (F1: sí en HD). |
+| `franja_min_ancho` | 0.5 | 0.0–2.0 | fracción del ancho | Altura mínima de la franja de la cabeza respecto al ancho de la persona (sentados o cortados por el borde). |  |
+| `yunet_puntuacion` | 0.8 | 0.3–0.99 |  | Confianza mínima de YuNet para aceptar una cara. | Bajar si se pierden caras inclinadas; vigilar caras falsas en rostro_intento. |
+| `cara_min_px` | 48 | 16–400 | px | Ancho mínimo de la cara (en HD) para intentar reconocerla. | Desde qué tamaño la similitud de una misma persona se mantiene alta. |
+| `frontal_min` | 0.5 | 0.0–1.0 |  | Frontalidad mínima (1 = de frente) según la simetría de ojos y nariz. |  |
+| `nitidez_min` | 20.0 | 0–10000 | var. Laplaciano | Nitidez mínima de la cara (descarta movidas o desenfocadas). |  |
+| `brillo_min` | 40.0 | 0–255 | nivel medio | Brillo medio mínimo de la cara (descarta caras en oscuridad). |  |
+| `umbral` | 0.45 | 0.1–0.95 | similitud | Similitud mínima con la galería para dar un nombre. | Distribución misma persona frente a distinta (F1: Brayan 0,43 con galería de webcam, desconocidos 0,22–0,24). |
+| `margen_segundo` | 0.08 | 0.0–0.5 | similitud | Diferencia mínima con la segunda persona más parecida. |  |
+| `votos` | 2 | 1–10 | coincidencias | Coincidencias con la misma persona para identificar. |  |
+| `intentos_max` | 5 | 1–50 | intentos | Intentos con cara válida sin coincidencia antes de marcar 'desconocida'. |  |
+| `espera_entre_intentos_s` | 1.5 | 0.2–60 | s | Tiempo mínimo entre intentos para la misma persona. |  |
+| `espera_max_s` | 30.0 | 1–600 | s | Sin cara (de espaldas, mirando abajo) la espera se duplica en cada intento hasta este máximo: evita abrir el vídeo HD sin parar. | Cada ráfaga HD cuesta ~0,4 s de CPU: subir si las personas pasan mucho tiempo sin mirar a la cámara. |
+| `reverificar_cada_s` | 60.0 | 5–3600 | s | Volver a verificar a una persona identificada. |  |
+| `persona_min_alto_px` | 60 | 10–1000 | px | Altura mínima de la persona en el substream para intentar (lejos = sin cara útil). |  |
+| `presupuesto_sface_s` | 3.0 | 0.2–50 | por segundo | Máximo de reconocimientos SFace por segundo en la cámara. |  |
+| `guardar_recortes` | True | true / false |  | Guardar el recorte de cada cara intentada (capturas/rostros) para calibrar. |  |
+
 ### `[reposo]`
 
 | Parámetro | Defecto | Rango | Unidad | Qué hace | Cómo calibrar |

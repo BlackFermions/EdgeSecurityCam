@@ -13,3 +13,5 @@ models/*.pt
 .venv/
 __pycache__/
 *.pyc
+models/*.onnx
+models/*.part

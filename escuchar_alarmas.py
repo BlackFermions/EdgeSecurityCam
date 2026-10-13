@@ -85,7 +85,52 @@ def load_verifier(args, hosts: list[str], username: str, password: str, viewer=N
     log.info("YOLO listo: verifica cada alarma y sigue a las personas.")
     return AnalysisManager(
         detector, {host: rtsp_url(host, username, password) for host in hosts},
-        args.snapshots_dir, viewer=viewer, settings=settings)
+        args.snapshots_dir, viewer=viewer, settings=settings,
+        faces=load_faces(hosts, username, password, settings))
+
+
+def load_faces(hosts, username, password, settings) -> dict:
+    """Motor de rostro para las cámaras con [rostro] activo = true."""
+    active = [host for host in hosts if settings[host].get("rostro", "activo")]
+    if not active:
+        log.info("Reconocimiento facial: desactivado ([rostro] activo = false).")
+        return {}
+    from src.faces.engine import FaceEngine
+    from src.faces.gallery import Gallery
+    from src.faces.models import SFACE, YUNET, FaceModelError, ensure_models
+    from src.faces.sface import SFaceRecognizer
+    from src.faces.yunet import YuNetDetector
+    from src.sources.hd import HdFrameGrabber
+    from src.sources.video import rtsp_url
+
+    try:
+        models = ensure_models(BASE_DIR / "models")
+    except FaceModelError as error:
+        log.error("Reconocimiento facial no disponible: %s.", error)
+        return {}
+    engines: dict[tuple[str, float], FaceEngine] = {}
+    faces = {}
+    for host in active:
+        cfg = settings[host].section("rostro")
+        folder = Path(cfg["galeria"])
+        folder = folder if folder.is_absolute() else (BASE_DIR / folder).resolve()
+        key = (str(folder), cfg["yunet_puntuacion"])
+        if key not in engines:
+            detector = YuNetDetector(models[YUNET], score=cfg["yunet_puntuacion"])
+            recognizer = SFaceRecognizer(models[SFACE])
+            cache = BASE_DIR / "data" / f"galeria_{abs(hash(str(folder))) % 10**8}.npz"
+            gallery = Gallery.load(folder, detector, recognizer, cache)
+            engines[key] = FaceEngine(detector, recognizer, gallery)
+            people = ", ".join(f"{name} ({len(vectors)})"
+                               for name, vectors in gallery.embeddings.items()) or "VACÍA"
+            log.info("Galería %s: %s%s", folder, people,
+                     f" · {len(gallery.skipped)} foto(s) sin cara utilizable"
+                     if gallery.skipped else "")
+        faces[host] = (engines[key], HdFrameGrabber(
+            rtsp_url(host, username, password, path=cfg["hd_ruta"])))
+        log.info("[%s] reconocimiento facial ACTIVO · umbral %.2f · %d votos · cara HD desde %s",
+                 host, cfg["umbral"], cfg["votos"], cfg["hd_ruta"])
+    return faces
 
 
 def main() -> int:
