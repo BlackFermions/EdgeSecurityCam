@@ -48,22 +48,47 @@ def _format(key: str, value: Any) -> str:
     return str(value)
 
 
-def diff_config(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """Cambios legibles entre dos configuraciones."""
+def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(value, dict):
+        flat: dict[str, Any] = {}
+        for key, item in value.items():
+            flat.update(_flatten(item, f"{prefix}.{key}" if prefix else str(key)))
+        return flat
+    return {prefix: value}
+
+
+def diff_config(old: dict[str, Any], new: dict[str, Any], limit: int = 8) -> list[str]:
+    """Cambios legibles entre dos configuraciones.
+
+    Los valores anidados (p. ej. los parámetros de IA) se comparan hoja por
+    hoja (``rostro.activo False → True``); si hay más de ``limit`` cambios en
+    una sección, se muestran los primeros y un resumen.
+    """
     changes: list[str] = []
     present = set(old) | set(new)
     ordered = [name for name in SECTION_LABELS if name in present]
     for section in ordered + sorted(present - set(SECTION_LABELS)):
         before, after = old.get(section, {}), new.get(section, {})
         label = SECTION_LABELS.get(section, section)
+        section_changes = []
         for key in sorted(set(before) | set(after)):
             if before.get(key) == after.get(key):
                 continue
             if key in STRUCTURED_KEYS:
-                changes.append(f"{label}: {STRUCTURED_KEYS[key]} modificada")
-            else:
-                changes.append(f"{label}: {key} {_format(key, before.get(key))} → "
-                               f"{_format(key, after.get(key))}")
+                section_changes.append(f"{label}: {STRUCTURED_KEYS[key]} modificada")
+                continue
+            flat_before, flat_after = _flatten(before.get(key), key), _flatten(after.get(key), key)
+            for leaf in sorted(set(flat_before) | set(flat_after)):
+                if flat_before.get(leaf) != flat_after.get(leaf):
+                    name = leaf.split(".")[-1]
+                    section_changes.append(
+                        f"{label}: {leaf} {_format(name, flat_before.get(leaf))} → "
+                        f"{_format(name, flat_after.get(leaf))}")
+        if len(section_changes) > limit:
+            hidden = len(section_changes) - limit
+            section_changes = section_changes[:limit] + [
+                f"{label}: … y {hidden} cambio(s) más (detalle en config_camara)"]
+        changes.extend(section_changes)
     return changes
 
 

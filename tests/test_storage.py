@@ -84,6 +84,19 @@ class ConfigDiffTests(unittest.TestCase):
         self.assertIn("Human Detect: región modificada", changes)
         self.assertIn("Motion Detect: enable desactivado → ACTIVADO", changes)
 
+    def test_nested_parameters_are_diffed_leaf_by_leaf(self):
+        old = {"ia": {"parametros": {"rostro": {"activo": False, "umbral": 0.45}}}}
+        new = {"ia": {"parametros": {"rostro": {"activo": True, "umbral": 0.45}}}}
+        self.assertEqual(diff_config(old, new),
+                         ["IA: parametros.rostro.activo False → True"])
+
+    def test_many_changes_are_summarized(self):
+        old = {"ia": {f"k{i}": i for i in range(20)}}
+        new = {"ia": {"parametros": {"x": 1}}}
+        changes = diff_config(old, new)
+        self.assertEqual(len(changes), 9)
+        self.assertIn("y 13 cambio(s) más", changes[-1])
+
     def test_hash_is_stable(self):
         self.assertEqual(config_hash(config()), config_hash(config()))
         self.assertNotEqual(config_hash(config()), config_hash(config(sensitivity=80)))

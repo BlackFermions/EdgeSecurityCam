@@ -1,0 +1,100 @@
+# Parámetros de CamDetector, por cámara.
+#
+# Copia este archivo como config/camdetector.toml (instalar.bat lo hace solo)
+# y ajusta SOLO lo que haga falta. Lo que no se escribe toma el valor por
+# defecto. Un nombre mal escrito es un error al arrancar: no se ignora.
+#
+# Prioridad: valores por defecto < [defecto.*] < [camaras."IP".*] < línea de comandos.
+# Descripción, rango y cómo calibrar cada parámetro: docs/parametros.md
+# Ver los valores efectivos:  python tools\parametros.py --camera 192.168.100.109
+#
+# Cada cambio queda registrado con la configuración de la cámara
+# (tabla config_camara): cada alarma se liga a los parámetros con que se procesó.
+
+# --- Valores comunes a todas las cámaras (descomentar para cambiar) ----------
+
+# [defecto.yolo]
+# confianza = 0.40            # detección fuerte: cuenta personas y confirma alarmas
+# confianza_debil = 0.15      # solo mantiene trayectorias existentes
+# tamano = 416                # 320 / 416 / 480 / 640 px; mayor = personas lejanas, más CPU
+
+# [defecto.veredicto]
+# confirmar_fotogramas = 2
+# decidir_s = 4.0             # sin ver a nadie: descartar
+# decidir_con_persona_s = 8.0 # si YOLO ya vio a alguien una vez
+
+# [defecto.politica]          # cuándo despertar a YOLO
+# confirmacion_s = 0.2
+# disparo_min_s = 0.5         # demora máxima para ver a alguien nuevo
+# movimiento_s = 1.0
+# quieto_s = 3.0
+# vigilancia_s = 1.0
+
+# [defecto.seguimiento]
+# iou_min = 0.25
+# cercania = 0.75             # en tamaños de caja
+# radio_max = 1.25            # en tamaños de caja
+# ausencias_max = 2
+# olvidar_s = 2.0
+# gracia_s = 10.0             # para "salió por el borde"
+# ocultas_s = 120.0           # para "DESAPARECIÓ"
+# margen_borde = 0.08         # fracción de cada borde
+# salida_px_s = 20.0          # velocidad hacia el borde para "sale"
+
+# [defecto.apariencia]        # color del torso
+# veto = 0.30
+# recuperacion = 0.80
+# margen = 0.10
+# superposicion_fuerte = 0.6
+
+# [defecto.puerta]            # diferencia de fotogramas
+# umbral = 25
+# fraccion_min = 0.004
+# margen = 0.15
+
+# [defecto.sesion]
+# procesar_cada_s = 0.1
+# max_s = 900.0
+
+# [defecto.rostro]            # reconocimiento facial (docs/plan_rostro.md)
+# activo = false              # requiere galería; activar por cámara tras calibrar
+# galeria = "face_gallery"    # una subcarpeta con fotos por persona
+# hd_ruta = "/stream1"        # vídeo HD del que se toma la cara (en ráfagas)
+# franja_cabeza = 0.30        # parte superior de la persona donde se busca la cara
+# franja_min_ancho = 0.50     # altura mínima de la franja respecto al ancho
+# yunet_puntuacion = 0.80
+# cara_min_px = 48
+# frontal_min = 0.50
+# nitidez_min = 20.0
+# brillo_min = 40.0
+# umbral = 0.45               # similitud mínima para dar un nombre
+# margen_segundo = 0.08
+# votos = 2
+# intentos_max = 5            # intentos con cara válida antes de "desconocida"
+# espera_entre_intentos_s = 1.5
+# espera_max_s = 30.0         # sin cara la espera se duplica hasta este máximo
+# reverificar_cada_s = 60.0
+# persona_min_alto_px = 60
+# presupuesto_sface_s = 3.0
+# guardar_recortes = true
+
+# [defecto.reposo]            # verificación aunque la cámara no avise
+# cada_s = 10.0               # 0 la desactiva
+# confianza_min = 0.50
+# espera_s = 60.0
+
+# [defecto.camara]
+# config_cada_s = 60.0
+# modo_movimiento = "auto"    # auto / human / motion
+
+# --- Una sección por cámara (solo lo que cambia para esa cámara) --------------
+
+[camaras."192.168.100.109"]
+nombre = "Sala de reuniones"
+
+# [camaras."192.168.100.109".seguimiento]
+# margen_borde = 0.10         # ejemplo: puerta cerca del borde derecho
+
+# [camaras."192.168.100.109".rostro]
+# activo = true
+# galeria = "face_gallery"

@@ -13,7 +13,7 @@ código propio. Más adelante, la base local será la cola de envío hacia el NO
 
 ## Instalación en el servidor (Windows)
 
-Requisitos: Python 3.10 o superior (probado con 3.12) y acceso de red a la
+Requisitos: Python 3.11 o superior (probado con 3.12) y acceso de red a la
 cámara.
 
 ```powershell
@@ -21,6 +21,7 @@ cámara.
 .\instalar.bat          # crea .venv, instala dependencias y descarga yolo26n
 
 # 2. Editar claves.txt con el usuario y la contraseña de la cámara
+#    y, si hace falta, config\camdetector.toml (parámetros por cámara)
 
 # 3. Iniciar (la IP por defecto está en ejecutar.bat)
 .\ejecutar.bat
@@ -69,11 +70,19 @@ cámara deja de avisar con alguien en la imagen (p. ej. en zonas oscuras).
 Necesita escritorio (no funciona en un servidor sin pantalla) y consume más
 CPU (decodificar el vídeo continuo y dibujar); es para depurar y calibrar.
 
+**Parámetros por cámara:** `config/camdetector.toml` (se crea en la instalación
+desde `config/camdetector.example.toml` y no se versiona). Cada cámara puede
+tener sus propios valores; lo no escrito toma el valor por defecto. Los
+parámetros aplicados se guardan con la configuración de la cámara en la
+base. Lista completa, rangos y cómo calibrar: [docs/parametros.md](docs/parametros.md).
+Para ver los valores efectivos: `python tools\parametros.py --camera IP`.
+
 Sin `--camera`, busca la cámara por su MAC con ONVIF. Varias cámaras se indican
-repitiendo `--camera`. Otras opciones: `--db`, `--no-db`, `--config-interval`,
+repitiendo `--camera`. Otras opciones: `--config`, `--db`, `--no-db`, `--config-interval`,
 `--yolo-size` (416 por defecto), `--yolo-confidence`, `--model`,
 `--snapshots-dir`, `--motion-mode`, `--idle-check-seconds` (10 por defecto,
-0 la desactiva), `--idle-min-confidence` (0,50).
+0 la desactiva), `--idle-min-confidence` (0,50). Estas opciones sustituyen
+el parámetro del archivo para todas las cámaras.
 
 Salida típica:
 
@@ -229,13 +238,54 @@ ONNX y quitar PyTorch es la siguiente optimización.
 `escuchar_alarmas.py` define `KMP_BLOCKTIME=0` y `OMP_WAIT_POLICY=PASSIVE`: sin
 ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
 
-## Base de datos del nodo (`data/camdetector.db`, esquema v3)
+## Reconocimiento facial
+
+Apagado por defecto: se activa por cámara con `[camaras."IP".rostro] activo = true`
+y una galería (`face_gallery/<persona>/*.jpg`, no se versiona). Los modelos
+YuNet y SFace (OpenCV Zoo, Apache-2.0) se descargan y verifican solos.
+
+- Se reconoce **una vez por persona seguida**, no en cada fotograma: tras
+  cada inferencia de YOLO se piden intentos solo para quien lo necesita.
+- La cara sale del **vídeo HD** (`/stream1`), abierto en ráfagas por un
+  trabajador aparte: un fotograma HD sirve a todas las personas pendientes.
+- Cada intento: franja de la cabeza → YuNet → calidad (tamaño, frontalidad,
+  nitidez, brillo) → solo si pasa, SFace y comparación con la galería (varias
+  huellas por persona; similitud máxima, con margen frente a la segunda).
+- **2 coincidencias** → nombre; **5 intentos con cara válida** sin
+  coincidencia → `Persona N` **desconocida**. Sin cara (de espaldas), la
+  espera se duplica hasta 30 s. Se reverifica cada 60 s y tras reaparecer.
+- Registro: `persona …-1 entró como Persona 1`, `persona …-1 = Brayan
+  (similitud 0.61 · 9 intento(s) de rostro)`; con `--raw`, cada intento.
+- Cada intento se guarda en `rostro_intento` (y el recorte en
+  `capturas/rostros/`) para calibrar el umbral por cámara.
+
+**Galería** (`face_gallery/<Nombre>/`, nunca se sube a Git):
+
+```powershell
+# Enrolar desde la cámara (ventana HD; ESPACIO guarda si la cara está en verde)
+python tools\galeria.py capturar --camera 192.168.100.109 --nombre "Pablo Fanola"
+# Revisar calidad de cada foto y si alguna se confunde con otra persona
+python tools\galeria.py revisar --camera 192.168.100.109
+```
+
+Las fotos tomadas con la propia cámara suben la similitud (mismo ángulo, luz
+y lente). Las fotos de perfil no ayudan: en vivo solo se reconocen caras de
+frente. Tras añadir fotos, reiniciar CamDetector.
+
+**Recortes:** cada intento guarda la cabeza (con margen) en
+`capturas/rostros/AAAA-MM-DD/` para calibrar; se borran solos tras
+`rostro.recortes_dias` (7). Son datos biométricos: solo en el nodo.
+
+Plan, mediciones y decisiones: [docs/plan_rostro.md](docs/plan_rostro.md).
+
+## Base de datos del nodo (`data/camdetector.db`, esquema v4)
 
 | Tabla | Una fila por | Contenido |
 |---|---|---|
 | `config_camara` | versión de configuración de una cámara | `vigente_desde`/`vigente_hasta`, Human/Motion Detect (activo, sensibilidad, duración), modelo, firmware, parámetros de IA y seguimiento, configuración completa en JSON (`datos`) |
 | `alarma` | alarma de la cámara o de la verificación en reposo | UUID, cámara, `config_id`, tipo (`human`, `motion` o `reposo` = la cámara no avisó), inicio, fin, duración, veredicto, máximo de personas, confianza, fotogramas, segundos hasta la primera persona, foto, nota |
 | `persona_track` | aparición de una persona | UUID, `codigo` legible, cámara, alarma y sesión, entrada, última vista, salida, segundos visible, confianza máxima, detecciones YOLO, `motivo_deteccion`, `recuperaciones` y `recuperaciones_apariencia`, nota (salió por el borde / DESAPARECIÓ en el centro / sesión terminada) |
+| `rostro_intento` | intento de reconocimiento facial | persona, resultado (coincide / bajo_umbral / ambiguo / sin_cara / calidad / union), calidad de la cara, mejor y segunda coincidencia con su similitud, recorte, tiempos |
 | `sesion_analisis` | sesión de análisis | inicio, fin, fotogramas, inferencias YOLO, ahorro, inferencias y personas nuevas por motivo, reapariciones por método (JSON) |
 | `evento_sistema` | evento del nodo | inicio, fin, conexión, desconexión, cambios de configuración, errores |
 
@@ -319,7 +369,7 @@ dentro sin tocar los demás:
 | `identity` | `AppearanceModel.signature / similarity / blend` | `ColorHistogramAppearance` | Re-ID (p. ej. OSNet) |
 | `tracking` | `TrackManager.flow_step / apply_detections` | flujo LK + Kalman + húngaro | — |
 | `analysis` | `yolo_reason`, `VerificationTracker`, `AnalysisManager` | reglas actuales | — |
-| `faces` | (por definir) | — | YuNet + SFace |
+| `faces` | `FaceDetector.detect`, `FaceRecognizer.embed` | YuNet + SFace | SFace int8, modelos más ligeros, NPU |
 
 ## Estructura
 
@@ -329,6 +379,7 @@ instalar.bat / ejecutar.bat  instalación y arranque en Windows
 requirements.txt
 claves.example.txt           plantilla de credenciales (claves.txt no se versiona)
 src/node.py                  servicio del nodo: une los módulos
+src/settings.py              parámetros por cámara (validación y documentación)
 src/credentials.py           credenciales de la cámara
 src/sources/                 1-2 · entradas
     camera_events.py           suscripción ONVIF e inicio/fin de alarmas
@@ -337,6 +388,7 @@ src/sources/                 1-2 · entradas
     discovery.py               búsqueda de la cámara por MAC
     video.py                   URL y apertura del RTSP
     snapshot.py                fotograma suelto (foto ONVIF o RTSP)
+    hd.py                      fotograma del vídeo HD en ráfaga
 src/detection/               3 · detector de personas
     base.py                    interfaz PersonDetector y FrameResult
     yolo.py                    YoloPersonDetector
@@ -345,18 +397,30 @@ src/tracking/                4 · seguimiento clásico
 src/identity/                5 · identidad corporal
     base.py                    interfaz AppearanceModel
     color.py                   histograma de color del torso
-src/faces/                   6-7 · rostro (próxima etapa)
+src/faces/                   6-7 · rostro
+    base.py                    interfaces FaceDetector / FaceRecognizer
+    yunet.py, sface.py         YuNet (cara) y SFace (huella)
+    quality.py                 franja de la cabeza y calidad de la cara
+    gallery.py                 galería con varias huellas por persona
+    engine.py                  un intento: franja → YuNet → calidad → SFace
+    models.py                  descarga y verificación de los modelos
 src/analysis/                8 · decisiones
     policy.py                  cuándo y por qué ejecutar YOLO (salvaguardas)
     verdict.py                 veredicto de cada alarma
     session.py                 sesión de análisis por cámara
     idle.py                    verificación periódica en reposo
+    face_policy.py             cuándo intentar el rostro y cómo decidir
+    face_worker.py             trabajador del rostro (ráfagas HD)
 src/storage/                 9 · base SQLite del nodo
 src/outputs/                 12 · salidas
     annotate.py                cajas sobre las fotos
     viewer.py                  ventana --ver
 tools/resumen.py             resumen de la base para calibrar
+tools/parametros.py          parámetros efectivos por cámara
+tools/galeria.py             enrolar personas desde la cámara y revisar la galería
 tools/sondear_eventos.py     diagnóstico de la cámara
+config/camdetector.example.toml   plantilla de parámetros por cámara
+docs/                        parámetros, plan del rostro y calibraciones
 tests/                       pruebas: python -m unittest discover -s tests -t .
 data/ logs/ capturas/ models/   datos locales (no se versionan)
 ```

@@ -12,6 +12,7 @@ activa o haya personas seguidas. Durante la sesión:
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import uuid
@@ -24,16 +25,23 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from src.analysis.face_policy import (
+    IDENTIFIED,
+    FaceState,
+    register_attempt,
+    should_attempt,
+)
+from src.analysis.face_worker import FaceWorker
 from src.analysis.policy import yolo_reason
 from src.analysis.verdict import VerificationSummary, VerificationTracker
 from src.detection.base import FrameResult, PersonDetector
 from src.outputs.annotate import annotate
+from src.settings import CameraSettings
 from src.sources.video import open_rtsp
 from src.tracking import FLOW_SCALE, MotionGate, PersonTrack, TrackManager
 from src.outputs.viewer import draw_overlay
 
 
-PROCESS_INTERVAL = 0.1          # ~10 fotogramas por segundo para flujo y puerta
 
 
 @dataclass
@@ -47,6 +55,11 @@ class SessionStats:
     reasons: Counter = field(default_factory=Counter)
     new_by_reason: Counter = field(default_factory=Counter)
     recoveries: Counter = field(default_factory=Counter)    # posicion / apariencia
+    face_grabs: int = 0           # ráfagas del vídeo HD
+    face_attempts: int = 0        # intentos de rostro (todas las personas)
+    face_compared: int = 0        # intentos que llegaron a SFace + galería
+    identified: int = 0
+    unknown: int = 0
     tracks: int = 0
     max_people: int = 0
     error: str | None = None
@@ -66,21 +79,26 @@ class SessionCallbacks:
     on_finished: Callable[[VerificationSummary], None] = lambda _: None
     on_track: Callable[[str, PersonTrack, str | None], None] = lambda *_: None
     on_session: Callable[[SessionStats], None] = lambda _: None
+    on_face_attempt: Callable[[PersonTrack, object, float], None] = lambda *_: None
 
 
 class AnalysisSession(threading.Thread):
     def __init__(self, camera: str, url: str, detector: PersonDetector,
                  callbacks: SessionCallbacks, snapshot_dir: Path | None,
-                 alarm_id: str | None, max_seconds: float = 900.0,
-                 viewer=None) -> None:
+                 alarm_id: str | None, settings: CameraSettings | None = None,
+                 viewer=None, faces=None, next_label=None) -> None:
         super().__init__(name=f"analisis-{camera}", daemon=True)
         self.camera = camera
         self._url = url
         self._detector = detector
         self._cb = callbacks
         self._snapshot_dir = snapshot_dir
-        self._max_seconds = max_seconds
+        self.settings = settings or CameraSettings(camera)
+        self._max_seconds = self.settings.get("sesion", "max_s")
         self._viewer = viewer
+        # Rostro: (FaceEngine, HdFrameGrabber) o None si está desactivado.
+        self._faces = faces
+        self._next_label = next_label or (lambda: None)
         self._halt = threading.Event()
         self._lock = threading.Lock()
         self._pending_alarms: list[str | None] = [alarm_id]
@@ -130,8 +148,16 @@ class AnalysisSession(threading.Thread):
 
     def run(self) -> None:
         verifications: list[VerificationTracker] = []
-        tracks = TrackManager(self.camera)
-        gate = MotionGate()
+        cfg = self.settings
+        verdict_cfg, policy_cfg = cfg.section("veredicto"), cfg.section("politica")
+        gate_cfg, yolo_cfg = cfg.section("puerta"), cfg.section("yolo")
+        detect_options = {"confidence": yolo_cfg["confianza"],
+                          "weak_confidence": yolo_cfg["confianza_debil"],
+                          "image_size": yolo_cfg["tamano"]}
+        process_interval = cfg.get("sesion", "procesar_cada_s")
+        tracks = TrackManager.from_settings(self.camera, cfg)
+        gate = MotionGate(threshold=gate_cfg["umbral"], min_fraction=gate_cfg["fraccion_min"],
+                          margin=gate_cfg["margen"])
         best: tuple[np.ndarray, FrameResult] | None = None
         best_key = (-1, 0.0)
         current_alarm: str | None = None
@@ -145,13 +171,75 @@ class AnalysisSession(threading.Thread):
         previous_gray: np.ndarray | None = None
         last_id = 0
         started = time.monotonic()
+        face_cfg = cfg.section("rostro")
+        face_states: dict[str, FaceState] = {}
+        boxes_lock = threading.Lock()
+        box_snapshot: dict[str, tuple] = {}
+        worker = None
+        if self._faces is not None:
+            engine, grabber = self._faces
+
+            def current_boxes(ids: set[str]) -> dict[str, tuple]:
+                with boxes_lock:
+                    return {tid: box_snapshot[tid] for tid in ids if tid in box_snapshot}
+
+            worker = FaceWorker(self.camera, engine, grabber, current_boxes,
+                                lambda: tracks.frame_size, face_cfg)
+            worker.start()
+
+        def apply_face_results(now: float) -> None:
+            while worker is not None:
+                try:
+                    track_id, attempt, hd_ms = worker.results.get_nowait()
+                except queue.Empty:
+                    return
+                state = face_states.get(track_id)
+                track = next((t for t in tracks.tracks + tracks.grace if t.id == track_id), None)
+                if state is None or track is None:
+                    continue
+                if attempt is None:                  # no se pudo abrir el vídeo HD
+                    state.requested, state.last_attempt = False, now
+                    continue
+                self.stats.face_attempts += 1
+                self.stats.face_compared += int(attempt.counts)
+                event = register_attempt(state, attempt, now, face_cfg)
+                track.face_attempts = state.attempts
+                track.face_status = state.status
+                self._cb.on_face_attempt(track, attempt, hd_ms)
+                if event is None:
+                    continue
+                status, name, score = event
+                track.face_score = score
+                if status == IDENTIFIED:
+                    track.identity = name
+                    self.stats.identified += 1
+                    self._cb.on_track("identified", track, None)
+                else:
+                    self.stats.unknown += 1
+                    self._cb.on_track("unknown", track, None)
+
+        def request_faces(now: float) -> None:
+            if worker is None:
+                return
+            with boxes_lock:
+                box_snapshot.clear()
+                box_snapshot.update({t.id: t.box for t in tracks.tracks})
+            for track in tracks.tracks:
+                state = face_states.setdefault(track.id, FaceState())
+                if should_attempt(state, now, track.box[3] - track.box[1], face_cfg):
+                    state.requested = True
+                    worker.request(track.id)
 
         def take_pending() -> bool:
             nonlocal current_alarm
             with self._lock:
                 pending, self._pending_alarms = self._pending_alarms, []
             for alarm_id in pending:
-                tracker = VerificationTracker(self.camera, time.monotonic())
+                tracker = VerificationTracker(
+                    self.camera, time.monotonic(),
+                    confirm_frames=verdict_cfg["confirmar_fotogramas"],
+                    decide_seconds=verdict_cfg["decidir_s"],
+                    seen_decide_seconds=verdict_cfg["decidir_con_persona_s"])
                 tracker.summary.alarm_id = alarm_id
                 verifications.append(tracker)
                 current_alarm = alarm_id
@@ -196,6 +284,7 @@ class AnalysisSession(threading.Thread):
                     continue
                 last_id = frame_id
                 self.stats.frames += 1
+                apply_face_results(now)
                 if tracks.frame_size is None:
                     tracks.frame_size = (frame.shape[1], frame.shape[0])
 
@@ -218,10 +307,15 @@ class AnalysisSession(threading.Thread):
                     alarm_pending=alarm_pending, alarm_active=alarm_active,
                     searching=bool(tracks.grace),
                     has_tracks=bool(tracks.tracks), motion_outside=motion_latched,
-                    track_lost=lost_latched, tracks_moving=moving or motion_inside)
+                    track_lost=lost_latched, tracks_moving=moving or motion_inside,
+                    confirm_interval=policy_cfg["confirmacion_s"],
+                    trigger_interval=policy_cfg["disparo_min_s"],
+                    moving_interval=policy_cfg["movimiento_s"],
+                    still_interval=policy_cfg["quieto_s"],
+                    watch_interval=policy_cfg["vigilancia_s"])
 
                 if reason is not None:
-                    result = self._detector.detect(frame)
+                    result = self._detector.detect(frame, **detect_options)
                     last_yolo, alarm_pending = time.monotonic(), False
                     motion_latched = lost_latched = False
                     self.stats.yolo_runs += 1
@@ -242,14 +336,18 @@ class AnalysisSession(threading.Thread):
                         list(result.weak_confidences), frame)
                     for track, how, unseen in tracks.last_recovered:
                         self.stats.recoveries[how] += 1
+                        if track.id in face_states:      # pudo cambiar de persona
+                            face_states[track.id].recheck = True
                         self._cb.on_track("recovered", track, f"{how}:{unseen:.1f}")
                     for track in created:
                         track.session_id = self.stats.id
+                        track.label = self._next_label()
                         self.stats.tracks += 1
                         self.stats.new_by_reason[reason] += 1
                         self._cb.on_track("entered", track, None)
                     for track in ended:
                         self._cb.on_track("left", track, None)
+                    request_faces(last_yolo)
                 else:
                     check_timeouts(now)
                 previous_gray = gray
@@ -268,9 +366,14 @@ class AnalysisSession(threading.Thread):
                             self._closing = True
                     if self._closing:
                         break
-                self._halt.wait(PROCESS_INTERVAL)
+                self._halt.wait(process_interval)
             check_timeouts(float("inf"))
         finally:
+            if worker is not None:
+                worker.request_stop()
+                worker.join(timeout=8)
+                apply_face_results(time.monotonic())
+                self.stats.face_grabs = worker.grabs
             with self._lock:
                 self._closing = True
             take_pending()      # alarmas llegadas durante el cierre
@@ -320,8 +423,14 @@ class AnalysisManager:
     """Una sesión de análisis por cámara, iniciada y alimentada por las alarmas."""
 
     def __init__(self, detector: PersonDetector, urls: dict[str, str],
-                 snapshot_dir: Path | None, viewer=None) -> None:
+                 snapshot_dir: Path | None, viewer=None,
+                 settings: dict[str, CameraSettings] | None = None,
+                 faces: dict | None = None) -> None:
         self._detector = detector
+        self._settings = settings or {}
+        # cámara -> (FaceEngine, HdFrameGrabber), solo con el rostro activo.
+        self._faces = faces or {}
+        self._labels: dict[str, tuple[str, int]] = {}    # cámara -> (día, último N)
         self._viewer = viewer
         self._urls = urls
         self._snapshot_dir = snapshot_dir
@@ -329,10 +438,12 @@ class AnalysisManager:
         self._sessions: dict[str, AnalysisSession] = {}
         self._lock = threading.Lock()
 
-    def set_callbacks(self, on_verdict, on_finished, on_track=None, on_session=None) -> None:
+    def set_callbacks(self, on_verdict, on_finished, on_track=None, on_session=None,
+                      on_face_attempt=None) -> None:
         self._callbacks = SessionCallbacks(
             on_verdict, on_finished,
-            on_track or (lambda *_: None), on_session or (lambda _: None))
+            on_track or (lambda *_: None), on_session or (lambda _: None),
+            on_face_attempt or (lambda *_: None))
 
     def alarm_started(self, camera: str, alarm_id: str | None = None) -> bool:
         """Devuelve True si abrió una sesión nueva; False si se unió a la actual."""
@@ -343,7 +454,10 @@ class AnalysisManager:
                 return False
             session = AnalysisSession(camera, self._urls[camera], self._detector,
                                       self._callbacks, self._snapshot_dir, alarm_id,
-                                      viewer=self._viewer)
+                                      settings=self._settings.get(camera),
+                                      viewer=self._viewer,
+                                      faces=self._faces.get(camera),
+                                      next_label=lambda c=camera: self.next_label(c))
             self._sessions[camera] = session
             session.start()
             return True
@@ -353,6 +467,15 @@ class AnalysisManager:
             session = self._sessions.get(camera)
         if session is not None:
             session.alarm_ended()
+
+    def next_label(self, camera: str) -> str:
+        """'Persona N', con numeración que se reinicia cada día por cámara."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            day, number = self._labels.get(camera, (today, 0))
+            number = number + 1 if day == today else 1
+            self._labels[camera] = (today, number)
+        return f"Persona {number}"
 
     @property
     def detector(self) -> PersonDetector:
