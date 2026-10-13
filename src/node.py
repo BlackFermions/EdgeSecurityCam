@@ -111,6 +111,11 @@ class CamDetectorNode:
             listener.start()
         for checker in self.idle_checkers:
             checker.start()
+        if self.base_dir is not None and any(
+                s.get("rostro", "activo") for s in self.settings.values()):
+            self._purge_thread = threading.Thread(target=self._purge_loop,
+                                                  name="retencion", daemon=True)
+            self._purge_thread.start()
         for checker in self.idle_checkers:
             log.info("[%s] verificación en reposo: 1 fotograma cada %.0f s si la cámara "
                      "no avisa.", checker.camera, checker.interval)
@@ -353,6 +358,22 @@ class CamDetectorNode:
             self.store.track_left(track, note)
             if track.face_attempts:
                 self.store.track_face(track)
+
+    def _purge_loop(self) -> None:
+        """Borra al arrancar y cada hora los recortes de rostro vencidos."""
+        from src.outputs.retention import purge_old_days
+        days = min(s.get("rostro", "recortes_dias") for s in self.settings.values()
+                   if s.get("rostro", "activo"))
+        folder = self.base_dir / "capturas" / "rostros"
+        stop = threading.Event()
+        while not self._closing:
+            removed = purge_old_days(folder, days)
+            if removed:
+                log.info("Retención de rostros: borrados los recortes de %s (más de %d días).",
+                         ", ".join(removed), days)
+                self._system_event(None, "retencion",
+                                   f"recortes borrados: {', '.join(removed)}")
+            stop.wait(3600)
 
     def _on_face_attempt(self, track, attempt, hd_ms: float) -> None:
         match = attempt.match

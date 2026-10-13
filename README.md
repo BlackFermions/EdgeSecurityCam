@@ -259,6 +259,23 @@ YuNet y SFace (OpenCV Zoo, Apache-2.0) se descargan y verifican solos.
 - Cada intento se guarda en `rostro_intento` (y el recorte en
   `capturas/rostros/`) para calibrar el umbral por cámara.
 
+**Galería** (`face_gallery/<Nombre>/`, nunca se sube a Git):
+
+```powershell
+# Enrolar desde la cámara (ventana HD; ESPACIO guarda si la cara está en verde)
+python tools\galeria.py capturar --camera 192.168.100.109 --nombre "Pablo Fanola"
+# Revisar calidad de cada foto y si alguna se confunde con otra persona
+python tools\galeria.py revisar --camera 192.168.100.109
+```
+
+Las fotos tomadas con la propia cámara suben la similitud (mismo ángulo, luz
+y lente). Las fotos de perfil no ayudan: en vivo solo se reconocen caras de
+frente. Tras añadir fotos, reiniciar CamDetector.
+
+**Recortes:** cada intento guarda la cabeza (con margen) en
+`capturas/rostros/AAAA-MM-DD/` para calibrar; se borran solos tras
+`rostro.recortes_dias` (7). Son datos biométricos: solo en el nodo.
+
 Plan, mediciones y decisiones: [docs/plan_rostro.md](docs/plan_rostro.md).
 
 ## Base de datos del nodo (`data/camdetector.db`, esquema v4)
@@ -400,6 +417,7 @@ src/outputs/                 12 · salidas
     viewer.py                  ventana --ver
 tools/resumen.py             resumen de la base para calibrar
 tools/parametros.py          parámetros efectivos por cámara
+tools/galeria.py             enrolar personas desde la cámara y revisar la galería
 tools/sondear_eventos.py     diagnóstico de la cámara
 config/camdetector.example.toml   plantilla de parámetros por cámara
 docs/                        parámetros, plan del rostro y calibraciones

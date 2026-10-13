@@ -72,5 +72,23 @@ class GalleryMatchTests(unittest.TestCase):
         self.assertEqual(Gallery().match(unit(1, 0, 0), 0.5, 0.08).reason, "galeria_vacia")
 
 
+class RetentionTests(unittest.TestCase):
+    def test_only_dated_folders_older_than_limit_are_removed(self):
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+
+        from src.outputs.retention import purge_old_days
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            for name in ("2026-10-01", "2026-10-06", "2026-10-13", "notas"):
+                (folder / name).mkdir()
+            removed = purge_old_days(folder, 7, today=date(2026, 10, 13))
+            self.assertEqual(removed, ["2026-10-01"])
+            self.assertEqual(sorted(p.name for p in folder.iterdir()),
+                             ["2026-10-06", "2026-10-13", "notas"])
+            self.assertEqual(purge_old_days(folder, 0, today=date(2027, 1, 1)), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -134,6 +134,8 @@ flujo óptico) no se exponen: dependen del algoritmo, no de la cámara.
 | `persona_min_alto_px` | 60 | 10–1000 | px | Altura mínima de la persona en el substream para intentar (lejos = sin cara útil). |  |
 | `presupuesto_sface_s` | 3.0 | 0.2–50 | por segundo | Máximo de reconocimientos SFace por segundo en la cámara. |  |
 | `guardar_recortes` | True | true / false |  | Guardar el recorte de cada cara intentada (capturas/rostros) para calibrar. |  |
+| `recortes_margen` | 0.4 | 0.0–2.0 | fracción | Margen alrededor de la cara en los recortes guardados (cabeza completa, revisable a ojo y útil para la galería). |  |
+| `recortes_dias` | 7 | 0–3650 | días | Días que se conservan los recortes de rostro (datos biométricos); 0 = no se borran. | Mientras se calibra conviene más; en producción, lo mínimo necesario. |
 
 ### `[reposo]`
 

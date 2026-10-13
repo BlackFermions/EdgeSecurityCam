@@ -32,7 +32,7 @@ desconocidos 0,22–0,24 (rechazados).
 | 3 | `FaceRecognizer` (SFace) + galería con varias huellas por persona (+ promedio) y caché | ✅ hecho 2026-10-13 (herramienta `tools/galeria.py`: pendiente) |
 | 4 | Planificador del rostro (`analysis/face_policy.py`): estados, votos, desconocida, espera creciente sin cara, reverificación | ✅ hecho 2026-10-13 (regla del 70 % para cajas unidas: pendiente; 2 caras en la franja ya se marcan como unión) |
 | 5 | Integración: trabajador aparte (`analysis/face_worker.py`), base v4 (`rostro_intento`, identidad en `persona_track`), registro, `--ver` | ✅ hecho 2026-10-13 |
-| 6 | Galería con capturas HD de esta cámara (día e IR) | pendiente |
+| 6 | Galería con capturas HD de esta cámara (día e IR): herramienta `tools/galeria.py` (`capturar`, `revisar`); recortes con margen y retención | 🔧 herramienta hecha 2026-10-13; falta enrolar (Pablo, fotos de cámara de Brayan y Diego) |
 | 7 | Calibración del umbral por cámara (`tools/calibrar_rostro.py`) | pendiente |
 
 ## Hallazgos del 2026-10-13 (pasos 1–5)
@@ -54,6 +54,14 @@ desconocidos 0,22–0,24 (rechazados).
 - **Primera identificación en vivo:** Brayan, similitud 0,61, en 9 intentos
   (3 coincidencias, 3 bajo umbral, 2 de mala calidad, 6 sin cara en total en
   la sesión). Ráfaga HD ~1,1 s; análisis del rostro 23–68 ms.
+
+## Revisión de la galería actual (2026-10-13, `tools/galeria.py revisar`)
+
+- Separación entre personas buena: Brayan 0,62 consigo mismo frente a 0,23
+  (Diego) y 0,17 (Fanola); ninguna foto se confunde.
+- 3 fotos de Brayan y 5 de Diego son **de perfil** (verificado dibujando los
+  5 puntos de YuNet): no ayudan, en vivo solo se compara de frente.
+  Sustituirlas por capturas de la cámara.
 
 ## Reglas acordadas
 

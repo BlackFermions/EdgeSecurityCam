@@ -124,6 +124,11 @@ SCHEMA: dict[str, dict[str, Param]] = {
         "persona_min_alto_px": Param(60, 10, 1000, "px", "Altura mínima de la persona en el substream para intentar (lejos = sin cara útil)."),
         "presupuesto_sface_s": Param(3.0, 0.2, 50, "por segundo", "Máximo de reconocimientos SFace por segundo en la cámara."),
         "guardar_recortes": Param(True, description="Guardar el recorte de cada cara intentada (capturas/rostros) para calibrar."),
+        "recortes_margen": Param(0.40, 0.0, 2.0, "fracción",
+                                 "Margen alrededor de la cara en los recortes guardados (cabeza completa, revisable a ojo y útil para la galería)."),
+        "recortes_dias": Param(7, 0, 3650, "días",
+                               "Días que se conservan los recortes de rostro (datos biométricos); 0 = no se borran.",
+                               calibrate="Mientras se calibra conviene más; en producción, lo mínimo necesario."),
     },
     "reposo": {
         "cada_s": Param(10.0, 0, 600, "s", "Verificación en reposo: un fotograma cada N s aunque la cámara no avise (0 = desactivada)."),

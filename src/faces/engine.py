@@ -88,7 +88,10 @@ class FaceEngine:
                 face = min((f.shifted(bx1, by1) for f in again),
                            key=lambda f: abs(f.x + f.width / 2 - cx) + abs(f.y + f.height / 2 - cy))
         quality = face_quality(hd_frame, face)
-        fx1, fy1, fx2, fy2 = clamp_box(face.box, width, height)
+        # Recorte con margen (cabeza completa): revisable a ojo y reutilizable
+        # en la galería. La calidad y la huella usan la cara, no el recorte.
+        fx1, fy1, fx2, fy2 = clamp_box(expand_box(face.box, params["recortes_margen"]),
+                                       width, height)
         crop = hd_frame[fy1:fy2, fx1:fx2].copy()
         problems = quality.problems(params["cara_min_px"], params["frontal_min"],
                                     params["nitidez_min"], params["brillo_min"])
