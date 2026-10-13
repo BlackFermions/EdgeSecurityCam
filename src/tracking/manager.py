@@ -89,12 +89,32 @@ class TrackManager:
        ``hidden_seconds`` antes de registrar que "desapareció".
     """
 
+    # Valores por defecto; por cámara se ajustan en config/camdetector.toml
+    # (grupos [seguimiento] y [apariencia]) mediante from_settings().
     APPEARANCE_VETO = 0.30       # ropa claramente distinta: no es la misma
     APPEARANCE_RECOVERY = 0.80   # reaparición lejana: exige ropa muy parecida
     APPEARANCE_MARGIN = 0.10     # y que no haya otra candidata casi igual
     STRONG_OVERLAP = 0.6         # superposición que pesa más que el color
     EXIT_SPEED = 20.0            # px/s hacia el borde para considerar que sale
     MAX_GATE = 1.25              # radio máximo por posición (en tamaños de caja)
+
+    @classmethod
+    def from_settings(cls, camera: str, settings) -> "TrackManager":
+        tracking, look = settings.section("seguimiento"), settings.section("apariencia")
+        manager = cls(camera, match_iou=tracking["iou_min"],
+                      center_gate=tracking["cercania"],
+                      max_misses=tracking["ausencias_max"],
+                      forget_seconds=tracking["olvidar_s"],
+                      grace_seconds=tracking["gracia_s"],
+                      hidden_seconds=tracking["ocultas_s"],
+                      edge_margin=tracking["margen_borde"])
+        manager.MAX_GATE = tracking["radio_max"]
+        manager.EXIT_SPEED = tracking["salida_px_s"]
+        manager.APPEARANCE_VETO = look["veto"]
+        manager.APPEARANCE_RECOVERY = look["recuperacion"]
+        manager.APPEARANCE_MARGIN = look["margen"]
+        manager.STRONG_OVERLAP = look["superposicion_fuerte"]
+        return manager
 
     def __init__(self, camera: str, match_iou: float = 0.25, center_gate: float = 0.75,
                  max_misses: int = 2, forget_seconds: float = 2.0,

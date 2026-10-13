@@ -16,6 +16,7 @@ from src.sources.camera_events import (
     OnvifEventClient,
 )
 from src.sources.camera_web import CameraWeb
+from src.settings import CameraSettings
 from src.storage import NodeStore
 
 
@@ -33,12 +34,15 @@ def describe_people(summary) -> str:
 
 class CamDetectorNode:
     def __init__(self, hosts: list[str], username: str, password: str,
-                 store: NodeStore | None, motion_mode: str = "auto",
-                 verifier=None, ia: dict[str, Any] | None = None,
-                 config_interval: float = 60.0, base_dir: Path | None = None,
-                 idle_sources: dict | None = None, idle_interval: float = 10.0,
-                 idle_min_confidence: float = 0.50) -> None:
+                 store: NodeStore | None, verifier=None,
+                 settings: dict[str, CameraSettings] | None = None,
+                 model_name: str | None = None, base_dir: Path | None = None,
+                 idle_sources: dict | None = None) -> None:
         self.hosts = hosts
+        # Parámetros efectivos por cámara (config/camdetector.toml + línea de
+        # comandos). Se guardan con cada versión de configuración de la cámara.
+        self.settings = {host: (settings or {}).get(host) or CameraSettings(host)
+                         for host in hosts}
         self.store = store
         self.verifier = verifier
         self.base_dir = base_dir
@@ -50,13 +54,22 @@ class CamDetectorNode:
         # La cámara reenvía el mismo estado varias veces por segundo; en el
         # registro detallado solo se muestran los cambios de valor.
         self._raw_last: dict[tuple[str, str], tuple[bool | None, int]] = {}
-        self.clients = {host: OnvifEventClient(host, username, password,
-                                               motion_mode=motion_mode)
+        self.clients = {host: OnvifEventClient(
+                            host, username, password,
+                            motion_mode=self.settings[host].get("camara", "modo_movimiento"))
                         for host in hosts}
-        self.watchers = {host: ConfigWatcher(host, CameraWeb(host, username, password),
-                                             {"ia": ia or {}}, self._on_config,
-                                             self._on_config_error, config_interval,
-                                             self._on_config_recovered)
+
+        def recorded(host: str) -> dict[str, Any]:
+            return {"modelo": model_name if verifier is not None else None,
+                    "camara_nombre": self.settings[host].name,
+                    "parametros": self.settings[host].as_dict()}
+
+        self.watchers = {host: ConfigWatcher(
+                             host, CameraWeb(host, username, password),
+                             {"ia": recorded(host)}, self._on_config,
+                             self._on_config_error,
+                             self.settings[host].get("camara", "config_cada_s"),
+                             self._on_config_recovered)
                          for host in hosts}
         self.listeners = [CameraEventListener(self.clients[host], self._on_alarm,
                                               self._status_handler(host))
@@ -67,14 +80,21 @@ class CamDetectorNode:
         # Verificación en reposo: solo con YOLO disponible y una fuente de
         # fotogramas por cámara.
         self.idle_checkers = []
-        if verifier is not None and idle_sources and idle_interval > 0:
+        if verifier is not None and idle_sources:
             from src.analysis.idle import IdleChecker
-            self.idle_checkers = [
-                IdleChecker(host, idle_sources[host], verifier.detector,
-                            verifier.has_session, self._on_idle_person,
-                            self._on_idle_status, interval=idle_interval,
-                            min_confidence=idle_min_confidence)
-                for host in hosts if host in idle_sources]
+            for host in hosts:
+                idle = self.settings[host].section("reposo")
+                if host not in idle_sources or not idle["cada_s"]:
+                    continue
+                yolo = self.settings[host].section("yolo")
+                self.idle_checkers.append(IdleChecker(
+                    host, idle_sources[host], verifier.detector, verifier.has_session,
+                    self._on_idle_person, self._on_idle_status,
+                    interval=idle["cada_s"], cooldown=idle["espera_s"],
+                    min_confidence=idle["confianza_min"],
+                    detect_options={"image_size": yolo["tamano"],
+                                    "confidence": yolo["confianza"],
+                                    "weak_confidence": yolo["confianza_debil"]}))
 
     # --- ciclo de vida ----------------------------------------------------
 
@@ -89,9 +109,9 @@ class CamDetectorNode:
             listener.start()
         for checker in self.idle_checkers:
             checker.start()
-        if self.idle_checkers:
-            log.info("Verificación en reposo: 1 fotograma cada %.0f s si la cámara no avisa.",
-                     self.idle_checkers[0].interval)
+        for checker in self.idle_checkers:
+            log.info("[%s] verificación en reposo: 1 fotograma cada %.0f s si la cámara "
+                     "no avisa.", checker.camera, checker.interval)
         log.info("Escuchando %d cámara(s). Ctrl+C para salir.", len(self.hosts))
 
     def close(self) -> None:

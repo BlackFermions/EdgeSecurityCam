@@ -1,5 +1,6 @@
 # Credenciales y datos locales del nodo
 claves.txt
+config/camdetector.toml
 data/
 logs/
 capturas/

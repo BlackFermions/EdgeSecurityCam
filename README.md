@@ -13,7 +13,7 @@ código propio. Más adelante, la base local será la cola de envío hacia el NO
 
 ## Instalación en el servidor (Windows)
 
-Requisitos: Python 3.10 o superior (probado con 3.12) y acceso de red a la
+Requisitos: Python 3.11 o superior (probado con 3.12) y acceso de red a la
 cámara.
 
 ```powershell
@@ -21,6 +21,7 @@ cámara.
 .\instalar.bat          # crea .venv, instala dependencias y descarga yolo26n
 
 # 2. Editar claves.txt con el usuario y la contraseña de la cámara
+#    y, si hace falta, config\camdetector.toml (parámetros por cámara)
 
 # 3. Iniciar (la IP por defecto está en ejecutar.bat)
 .\ejecutar.bat
@@ -69,11 +70,19 @@ cámara deja de avisar con alguien en la imagen (p. ej. en zonas oscuras).
 Necesita escritorio (no funciona en un servidor sin pantalla) y consume más
 CPU (decodificar el vídeo continuo y dibujar); es para depurar y calibrar.
 
+**Parámetros por cámara:** `config/camdetector.toml` (se crea en la instalación
+desde `config/camdetector.example.toml` y no se versiona). Cada cámara puede
+tener sus propios valores; lo no escrito toma el valor por defecto. Los
+parámetros aplicados se guardan con la configuración de la cámara en la
+base. Lista completa, rangos y cómo calibrar: [docs/parametros.md](docs/parametros.md).
+Para ver los valores efectivos: `python tools\parametros.py --camera IP`.
+
 Sin `--camera`, busca la cámara por su MAC con ONVIF. Varias cámaras se indican
-repitiendo `--camera`. Otras opciones: `--db`, `--no-db`, `--config-interval`,
+repitiendo `--camera`. Otras opciones: `--config`, `--db`, `--no-db`, `--config-interval`,
 `--yolo-size` (416 por defecto), `--yolo-confidence`, `--model`,
 `--snapshots-dir`, `--motion-mode`, `--idle-check-seconds` (10 por defecto,
-0 la desactiva), `--idle-min-confidence` (0,50).
+0 la desactiva), `--idle-min-confidence` (0,50). Estas opciones sustituyen
+el parámetro del archivo para todas las cámaras.
 
 Salida típica:
 
@@ -329,6 +338,7 @@ instalar.bat / ejecutar.bat  instalación y arranque en Windows
 requirements.txt
 claves.example.txt           plantilla de credenciales (claves.txt no se versiona)
 src/node.py                  servicio del nodo: une los módulos
+src/settings.py              parámetros por cámara (validación y documentación)
 src/credentials.py           credenciales de la cámara
 src/sources/                 1-2 · entradas
     camera_events.py           suscripción ONVIF e inicio/fin de alarmas
@@ -356,7 +366,10 @@ src/outputs/                 12 · salidas
     annotate.py                cajas sobre las fotos
     viewer.py                  ventana --ver
 tools/resumen.py             resumen de la base para calibrar
+tools/parametros.py          parámetros efectivos por cámara
 tools/sondear_eventos.py     diagnóstico de la cámara
+config/camdetector.example.toml   plantilla de parámetros por cámara
+docs/                        parámetros, plan del rostro y calibraciones
 tests/                       pruebas: python -m unittest discover -s tests -t .
 data/ logs/ capturas/ models/   datos locales (no se versionan)
 ```

@@ -28,12 +28,12 @@ from src.analysis.policy import yolo_reason
 from src.analysis.verdict import VerificationSummary, VerificationTracker
 from src.detection.base import FrameResult, PersonDetector
 from src.outputs.annotate import annotate
+from src.settings import CameraSettings
 from src.sources.video import open_rtsp
 from src.tracking import FLOW_SCALE, MotionGate, PersonTrack, TrackManager
 from src.outputs.viewer import draw_overlay
 
 
-PROCESS_INTERVAL = 0.1          # ~10 fotogramas por segundo para flujo y puerta
 
 
 @dataclass
@@ -71,7 +71,7 @@ class SessionCallbacks:
 class AnalysisSession(threading.Thread):
     def __init__(self, camera: str, url: str, detector: PersonDetector,
                  callbacks: SessionCallbacks, snapshot_dir: Path | None,
-                 alarm_id: str | None, max_seconds: float = 900.0,
+                 alarm_id: str | None, settings: CameraSettings | None = None,
                  viewer=None) -> None:
         super().__init__(name=f"analisis-{camera}", daemon=True)
         self.camera = camera
@@ -79,7 +79,8 @@ class AnalysisSession(threading.Thread):
         self._detector = detector
         self._cb = callbacks
         self._snapshot_dir = snapshot_dir
-        self._max_seconds = max_seconds
+        self.settings = settings or CameraSettings(camera)
+        self._max_seconds = self.settings.get("sesion", "max_s")
         self._viewer = viewer
         self._halt = threading.Event()
         self._lock = threading.Lock()
@@ -130,8 +131,16 @@ class AnalysisSession(threading.Thread):
 
     def run(self) -> None:
         verifications: list[VerificationTracker] = []
-        tracks = TrackManager(self.camera)
-        gate = MotionGate()
+        cfg = self.settings
+        verdict_cfg, policy_cfg = cfg.section("veredicto"), cfg.section("politica")
+        gate_cfg, yolo_cfg = cfg.section("puerta"), cfg.section("yolo")
+        detect_options = {"confidence": yolo_cfg["confianza"],
+                          "weak_confidence": yolo_cfg["confianza_debil"],
+                          "image_size": yolo_cfg["tamano"]}
+        process_interval = cfg.get("sesion", "procesar_cada_s")
+        tracks = TrackManager.from_settings(self.camera, cfg)
+        gate = MotionGate(threshold=gate_cfg["umbral"], min_fraction=gate_cfg["fraccion_min"],
+                          margin=gate_cfg["margen"])
         best: tuple[np.ndarray, FrameResult] | None = None
         best_key = (-1, 0.0)
         current_alarm: str | None = None
@@ -151,7 +160,11 @@ class AnalysisSession(threading.Thread):
             with self._lock:
                 pending, self._pending_alarms = self._pending_alarms, []
             for alarm_id in pending:
-                tracker = VerificationTracker(self.camera, time.monotonic())
+                tracker = VerificationTracker(
+                    self.camera, time.monotonic(),
+                    confirm_frames=verdict_cfg["confirmar_fotogramas"],
+                    decide_seconds=verdict_cfg["decidir_s"],
+                    seen_decide_seconds=verdict_cfg["decidir_con_persona_s"])
                 tracker.summary.alarm_id = alarm_id
                 verifications.append(tracker)
                 current_alarm = alarm_id
@@ -218,10 +231,15 @@ class AnalysisSession(threading.Thread):
                     alarm_pending=alarm_pending, alarm_active=alarm_active,
                     searching=bool(tracks.grace),
                     has_tracks=bool(tracks.tracks), motion_outside=motion_latched,
-                    track_lost=lost_latched, tracks_moving=moving or motion_inside)
+                    track_lost=lost_latched, tracks_moving=moving or motion_inside,
+                    confirm_interval=policy_cfg["confirmacion_s"],
+                    trigger_interval=policy_cfg["disparo_min_s"],
+                    moving_interval=policy_cfg["movimiento_s"],
+                    still_interval=policy_cfg["quieto_s"],
+                    watch_interval=policy_cfg["vigilancia_s"])
 
                 if reason is not None:
-                    result = self._detector.detect(frame)
+                    result = self._detector.detect(frame, **detect_options)
                     last_yolo, alarm_pending = time.monotonic(), False
                     motion_latched = lost_latched = False
                     self.stats.yolo_runs += 1
@@ -268,7 +286,7 @@ class AnalysisSession(threading.Thread):
                             self._closing = True
                     if self._closing:
                         break
-                self._halt.wait(PROCESS_INTERVAL)
+                self._halt.wait(process_interval)
             check_timeouts(float("inf"))
         finally:
             with self._lock:
@@ -320,8 +338,10 @@ class AnalysisManager:
     """Una sesión de análisis por cámara, iniciada y alimentada por las alarmas."""
 
     def __init__(self, detector: PersonDetector, urls: dict[str, str],
-                 snapshot_dir: Path | None, viewer=None) -> None:
+                 snapshot_dir: Path | None, viewer=None,
+                 settings: dict[str, CameraSettings] | None = None) -> None:
         self._detector = detector
+        self._settings = settings or {}
         self._viewer = viewer
         self._urls = urls
         self._snapshot_dir = snapshot_dir
@@ -343,6 +363,7 @@ class AnalysisManager:
                 return False
             session = AnalysisSession(camera, self._urls[camera], self._detector,
                                       self._callbacks, self._snapshot_dir, alarm_id,
+                                      settings=self._settings.get(camera),
                                       viewer=self._viewer)
             self._sessions[camera] = session
             session.start()
