@@ -17,7 +17,7 @@ from src.settings import CameraSettings
 PARAMS = CameraSettings("cam").section("rostro")      # votos 2, intentos_max 5, espera 1,5 s
 
 
-def attempt(name=None, score=0.6, valid=True):
+def attempt(name=None, score=0.55, valid=True):   # < umbral_seguro (0,60)
     if not valid:
         return SimpleNamespace(counts=False, match=None)
     reason = "coincide" if name else "bajo_umbral"
@@ -89,6 +89,31 @@ class RecheckTests(unittest.TestCase):
         self.assertFalse(should_attempt(state, 40.0, 120, PARAMS))
 
 
+class CandidateTests(unittest.TestCase):
+    def test_log_2026_10_13_1739_is_not_unknown(self):
+        # Brayan: 0,26 / 0,45 / 0,70 / 0,28 / 0,34 (las bajas con la cara cortada).
+        state = FaceState()
+        params = dict(PARAMS, umbral_seguro=0.99)        # sin la regla de coincidencia segura
+        for t, (name, score) in enumerate([(None, 0.26), (None, 0.449), ("Brayan", 0.70),
+                                           (None, 0.28), (None, 0.34)]):
+            self.assertIsNone(register_attempt(state, attempt(name, score), float(t), params))
+        self.assertEqual(state.status, PENDING)          # sigue siendo candidato
+
+    def test_strong_single_match_identifies(self):
+        state = FaceState()
+        event = register_attempt(state, attempt("Brayan", 0.70), 1.0, PARAMS)
+        self.assertEqual(event, (IDENTIFIED, "Brayan", 0.70))
+
+    def test_candidate_gives_up_after_double_attempts(self):
+        state = FaceState()
+        params = dict(PARAMS, umbral_seguro=0.99)
+        register_attempt(state, attempt("Brayan", 0.50), 0.0, params)
+        events = [register_attempt(state, attempt(None, 0.3), float(t), params)
+                  for t in range(1, 10)]
+        self.assertEqual(events[-1][0], UNKNOWN)
+        self.assertTrue(all(e is None for e in events[:-1]))
+
+
 class RegisterAttemptTests(unittest.TestCase):
     def test_two_votes_identify(self):
         state = FaceState()
@@ -116,7 +141,11 @@ class RegisterAttemptTests(unittest.TestCase):
         register_attempt(state, attempt("Brayan"), 1.0, PARAMS)
         for t in range(2, 6):
             register_attempt(state, attempt(None, 0.3), t, PARAMS)
-        self.assertEqual(state.status, UNKNOWN)
+        self.assertEqual(state.status, PENDING)      # candidato: sigue intentando
+        self.assertIsNone(state.name)
+        for t in range(6, 11):
+            register_attempt(state, attempt(None, 0.3), t, PARAMS)
+        self.assertEqual(state.status, UNKNOWN)      # al doble de intentos se rinde
         self.assertIsNone(state.name)
 
     def test_identity_can_change_with_enough_votes(self):

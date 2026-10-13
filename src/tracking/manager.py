@@ -55,6 +55,7 @@ class PersonTrack:
     face_status: str | None = None
     face_score: float = 0.0
     face_attempts: int = 0
+    last_strong: float | None = None      # última detección fuerte (no débil)
 
     @property
     def display_name(self) -> str:
@@ -107,6 +108,9 @@ class TrackManager:
     STRONG_OVERLAP = 0.6         # superposición que pesa más que el color
     EXIT_SPEED = 20.0            # px/s hacia el borde para considerar que sale
     MAX_GATE = 1.25              # radio máximo por posición (en tamaños de caja)
+    WEAK_HOLD_S = 5.0            # máximo sostenido solo por detecciones débiles
+    DUPLICATE_CONTAINMENT = 0.70 # caja contenida en una persona seguida = duplicado
+    DUPLICATE_HEIGHT = 0.70      # ...si su altura es parecida (regla del 70 %)
 
     @classmethod
     def from_settings(cls, camera: str, settings) -> "TrackManager":
@@ -124,6 +128,8 @@ class TrackManager:
         manager.APPEARANCE_RECOVERY = look["recuperacion"]
         manager.APPEARANCE_MARGIN = look["margen"]
         manager.STRONG_OVERLAP = look["superposicion_fuerte"]
+        manager.WEAK_HOLD_S = tracking["debil_max_s"]
+        manager.DUPLICATE_CONTAINMENT = tracking["duplicado_contencion"]
         return manager
 
     def __init__(self, camera: str, match_iou: float = 0.25, center_gate: float = 0.75,
@@ -300,11 +306,16 @@ class TrackManager:
         # 1. Fuertes con activas.
         for track, d in self._match(self.tracks, boxes, signatures, remaining, now):
             self._refresh(track, boxes[d], confidences[d], now, wall, gray, signatures[d])
+            track.last_strong = now
             matched.add(track.id)
             remaining.remove(d)
 
-        # 2. Débiles con activas sin pareja: solo las mantienen vivas.
-        unmatched = [track for track in self.tracks if track.id not in matched]
+        # 2. Débiles con activas sin pareja: solo las mantienen vivas, y solo
+        #    unos segundos: si no vuelve una detección fuerte, la trayectoria
+        #    puede haber quedado "pegada" a una silla u objeto (2026-10-13).
+        unmatched = [track for track in self.tracks if track.id not in matched
+                     and now - (track.last_strong if track.last_strong is not None
+                                else track.first_seen) <= self.WEAK_HOLD_S]
         weak_signatures: list[np.ndarray | None] = [None] * len(weak_boxes)
         for track, d in self._match(unmatched, weak_boxes, weak_signatures,
                                     list(range(len(weak_boxes))), now):
@@ -385,8 +396,14 @@ class TrackManager:
                                               else self.hidden_seconds)]
         self.grace = [track for track in self.grace if track not in ended]
 
-        # 6. Fuertes que no son nadie conocido: persona nueva.
+        # 6. Fuertes que no son nadie conocido: persona nueva, salvo que sea
+        #    una caja duplicada de alguien ya seguido (contenida en su caja y de
+        #    altura parecida; una persona más baja dentro, p. ej. un niño, sí
+        #    cuenta como nueva).
         created: list[PersonTrack] = []
+        for d in list(remaining):
+            if self._is_duplicate(boxes[d]):
+                remaining.remove(d)
         for d in remaining:
             track = PersonTrack(
                 camera=self.camera, code=self.new_code(wall), started_wall=wall,
@@ -394,16 +411,29 @@ class TrackManager:
                 confidence=confidences[d], reason=reason, alarm_id=alarm_id,
                 max_confidence=confidences[d], last_seen_wall=wall,
                 flow=FlowTracker(gray, boxes[d]) if gray is not None else None,
-                model=MotionModel(boxes[d], now), signature=signatures[d])
+                model=MotionModel(boxes[d], now), signature=signatures[d],
+                last_strong=now)
             self.tracks.append(track)
             created.append(track)
         return created, ended
+
+    def _is_duplicate(self, box: Box) -> bool:
+        x1, y1, x2, y2 = box
+        area = max((x2 - x1) * (y2 - y1), 1.0)
+        for track in self.tracks:
+            tx1, ty1, tx2, ty2 = track.box
+            inter = max(0.0, min(x2, tx2) - max(x1, tx1)) * max(0.0, min(y2, ty2) - max(y1, ty1))
+            if (inter / area >= self.DUPLICATE_CONTAINMENT
+                    and (y2 - y1) >= self.DUPLICATE_HEIGHT * (ty2 - ty1)):
+                return True
+        return False
 
     def _recover(self, track: PersonTrack, how: str, box: Box, confidence: float,
                  now: float, wall: datetime, gray: np.ndarray | None,
                  signature: np.ndarray | None) -> None:
         unseen = now - track.last_seen
         self._refresh(track, box, confidence, now, wall, gray, signature)
+        track.last_strong = now
         track.recoveries += 1
         if how == "apariencia":
             track.recoveries_by_appearance += 1

@@ -70,16 +70,34 @@ class FaceEngine:
             return done("sin_cara")
         if len(faces) >= 2:
             return done("union", faces=len(faces))
-        face = faces[0]
-        quality = face_quality(band, face)
-        fx1, fy1, fx2, fy2 = clamp_box(face.box, band.shape[1], band.shape[0])
-        crop = band[fy1:fy2, fx1:fx2].copy()
+        # La cara se pasa a coordenadas del fotograma HD completo: la calidad,
+        # el recorte y el alineamiento de SFace usan la imagen entera, no la
+        # franja (que puede cortar la barbilla).
+        face = faces[0].shifted(bx1, by1)
+        if face.y + face.height >= by2 - 2 and by2 < height:
+            # La cara toca el borde inferior de la franja (persona mirando
+            # hacia abajo, 2026-10-13): se vuelve a buscar con la franja
+            # ampliada para tener la cara completa.
+            ey2 = min(height, int(face.y + face.height * 2.2))
+            larger = hd_frame[by1:ey2, bx1:bx2]
+            with self._lock:
+                again = [f for f in self.detector.detect(larger)
+                         if f.score >= params["yunet_puntuacion"]]
+            if again:
+                cx, cy = face.x + face.width / 2, face.y + face.height / 2
+                face = min((f.shifted(bx1, by1) for f in again),
+                           key=lambda f: abs(f.x + f.width / 2 - cx) + abs(f.y + f.height / 2 - cy))
+        quality = face_quality(hd_frame, face)
+        fx1, fy1, fx2, fy2 = clamp_box(face.box, width, height)
+        crop = hd_frame[fy1:fy2, fx1:fx2].copy()
         problems = quality.problems(params["cara_min_px"], params["frontal_min"],
                                     params["nitidez_min"], params["brillo_min"])
+        if face.y + face.height > height - 2 or face.y < 1:
+            problems.append("cortada")
         if problems:
             return done("calidad", quality, 1, None, problems, crop)
         with self._lock:
-            vector = self.recognizer.embed(band, face)
+            vector = self.recognizer.embed(hd_frame, face)
         if vector is None:
             return done("calidad", quality, 1, None, ("no alineable",), crop)
         match = self.gallery.match(vector, params["umbral"], params["margen_segundo"])

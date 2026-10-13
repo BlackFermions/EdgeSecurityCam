@@ -39,6 +39,7 @@ class FaceState:
     requested: bool = False
     recheck: bool = False            # forzar verificación (reaparición, cruce)
     misses_in_row: int = 0           # intentos seguidos sin cara utilizable
+    max_valid_score: float = 0.0     # mejor similitud en intentos válidos (a quien sea)
 
 
 def current_wait(state: FaceState, params: dict) -> float:
@@ -82,10 +83,13 @@ def register_attempt(state: FaceState, attempt, now: float, params: dict
     state.misses_in_row = 0
     state.valid_attempts += 1
     match = attempt.match
+    state.max_valid_score = max(state.max_valid_score, match.score)
     if match.name is not None:
         state.votes[match.name] += 1
         state.best_scores[match.name] = max(state.best_scores.get(match.name, 0.0), match.score)
-        if state.votes[match.name] >= params["votos"]:
+        # Una coincidencia muy segura identifica sola; si no, hacen falta votos.
+        if (state.votes[match.name] >= params["votos"]
+                or match.score >= params["umbral_seguro"]):
             changed = state.status != IDENTIFIED or state.name != match.name
             state.status, state.name = IDENTIFIED, match.name
             state.score = state.best_scores[match.name]
@@ -94,7 +98,13 @@ def register_attempt(state: FaceState, attempt, now: float, params: dict
             if changed:
                 return (IDENTIFIED, match.name, state.score)
         return None
-    if state.status == PENDING and state.valid_attempts >= params["intentos_max"]:
+    # Desconocida solo si NINGÚN intento alcanzó el umbral. Si alguno lo hizo
+    # (un candidato), se sigue intentando hasta el doble antes de rendirse:
+    # caras cortadas o inclinadas bajan la similitud de una persona conocida
+    # (2026-10-13: Brayan 0,70 una vez y 0,26–0,34 con la cara cortada).
+    candidate = state.max_valid_score >= params["umbral"]
+    limit = params["intentos_max"] * (2 if candidate else 1)
+    if state.status == PENDING and state.valid_attempts >= limit:
         state.status, state.decided_at = UNKNOWN, now
         state.score = max([match.score, *state.best_scores.values()])
         return (UNKNOWN, None, state.score)

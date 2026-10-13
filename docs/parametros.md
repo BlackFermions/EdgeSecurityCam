@@ -82,6 +82,8 @@ flujo óptico) no se exponen: dependen del algoritmo, no de la cámara.
 | `ocultas_s` | 120.0 | 5–3600 | s | Espera antes de registrar que DESAPARECIÓ en el interior. |  |
 | `margen_borde` | 0.08 | 0.0–0.4 | fracción | Franja de cada borde por donde se puede salir. | Ajustar a la geometría de la escena (puertas cerca de un borde). |
 | `salida_px_s` | 20.0 | 0–500 | px/s | Velocidad hacia el borde para considerar que la persona sale. |  |
+| `debil_max_s` | 5.0 | 0.5–60 | s | Tiempo máximo que solo detecciones débiles sostienen una trayectoria (evita que quede 'pegada' a una silla u objeto). |  |
+| `duplicado_contencion` | 0.7 | 0.3–1.0 | fracción | Una caja nueva contenida en esta fracción dentro de una persona ya seguida, y de altura parecida (≥ 70 %), es un duplicado, no otra persona. |  |
 
 ### `[apariencia]`
 
@@ -123,6 +125,7 @@ flujo óptico) no se exponen: dependen del algoritmo, no de la cámara.
 | `brillo_min` | 40.0 | 0–255 | nivel medio | Brillo medio mínimo de la cara (descarta caras en oscuridad). |  |
 | `umbral` | 0.45 | 0.1–0.95 | similitud | Similitud mínima con la galería para dar un nombre. | Distribución misma persona frente a distinta (F1: Brayan 0,43 con galería de webcam, desconocidos 0,22–0,24). |
 | `margen_segundo` | 0.08 | 0.0–0.5 | similitud | Diferencia mínima con la segunda persona más parecida. |  |
+| `umbral_seguro` | 0.6 | 0.1–1.0 | similitud | Una sola coincidencia por encima de este valor identifica sin esperar más votos. | 2026-10-13: Brayan 0,57–0,70 frente a 0,21–0,32 de otras personas. |
 | `votos` | 2 | 1–10 | coincidencias | Coincidencias con la misma persona para identificar. |  |
 | `intentos_max` | 5 | 1–50 | intentos | Intentos con cara válida sin coincidencia antes de marcar 'desconocida'. |  |
 | `espera_entre_intentos_s` | 1.5 | 0.2–60 | s | Tiempo mínimo entre intentos para la misma persona. |  |
