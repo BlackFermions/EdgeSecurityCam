@@ -68,6 +68,27 @@ class BackoffTests(unittest.TestCase):
         self.assertEqual(current_wait(state, PARAMS), 1.5)
 
 
+class RecheckTests(unittest.TestCase):
+    def test_recheck_is_consumed_and_backoff_resumes(self):
+        # 2026-10-13 12:21: Persona 2 reapareció y, sin cara, se intentó cada
+        # ~4 s durante más de un minuto (36 ráfagas HD en 4 minutos).
+        state = FaceState()
+        for t in range(4):
+            register_attempt(state, attempt(valid=False), float(t), PARAMS)
+        state.recheck = True
+        self.assertTrue(should_attempt(state, 10.0, 120, PARAMS))
+        self.assertFalse(state.recheck)
+        state.requested = True
+        register_attempt(state, attempt(valid=False), 10.0, PARAMS)
+        waits = []
+        for t in (13.1, 19.2, 31.3):
+            self.assertTrue(should_attempt(state, t, 120, PARAMS))
+            register_attempt(state, attempt(valid=False), t, PARAMS)
+            waits.append(current_wait(state, PARAMS))
+        self.assertEqual(waits, [6.0, 12.0, 24.0])
+        self.assertFalse(should_attempt(state, 40.0, 120, PARAMS))
+
+
 class RegisterAttemptTests(unittest.TestCase):
     def test_two_votes_identify(self):
         state = FaceState()

@@ -52,11 +52,17 @@ def should_attempt(state: FaceState, now: float, person_height_px: float,
                    params: dict) -> bool:
     if state.requested or person_height_px < params["persona_min_alto_px"]:
         return False
-    if state.recheck:                 # reapareció: la espera acumulada no aplica
+    if state.recheck:
+        # Reapareció tras perderse: un intento inmediato, sin la espera
+        # acumulada. La marca se consume aquí; si no hay cara, la espera vuelve
+        # a crecer (2026-10-13: la marca solo se borraba con un intento válido
+        # y reiniciaba la espera en cada turno de una persona sin cara).
+        state.recheck = False
         state.misses_in_row = 0
+        return now - state.last_attempt >= params["espera_entre_intentos_s"]
     if now - state.last_attempt < current_wait(state, params):
         return False
-    if state.recheck or state.status == PENDING:
+    if state.status == PENDING:
         return True
     return (state.decided_at is not None
             and now - state.decided_at >= params["reverificar_cada_s"])
@@ -83,20 +89,17 @@ def register_attempt(state: FaceState, attempt, now: float, params: dict
             changed = state.status != IDENTIFIED or state.name != match.name
             state.status, state.name = IDENTIFIED, match.name
             state.score = state.best_scores[match.name]
-            state.decided_at, state.recheck = now, False
+            state.decided_at = now
             state.votes.clear()
             if changed:
                 return (IDENTIFIED, match.name, state.score)
         return None
     if state.status == PENDING and state.valid_attempts >= params["intentos_max"]:
-        state.status, state.decided_at, state.recheck = UNKNOWN, now, False
+        state.status, state.decided_at = UNKNOWN, now
         state.score = max([match.score, *state.best_scores.values()])
         return (UNKNOWN, None, state.score)
-    if state.status != PENDING and state.recheck:
-        # Verificación tras una reaparición sin coincidencia: se mantiene la
-        # decisión anterior pero se vuelve a programar normalmente.
-        state.recheck = False
-        state.decided_at = now
-    elif state.status != PENDING:
+    if state.status != PENDING:
+        # Verificación sin coincidencia: se mantiene la decisión anterior y se
+        # programa la siguiente verificación.
         state.decided_at = now
     return None

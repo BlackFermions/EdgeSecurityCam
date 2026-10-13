@@ -58,11 +58,14 @@ def configure_logging(log_file: Path | None, verbose: bool) -> None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
     logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
+        level=logging.INFO,
         format="%(asctime)s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=handlers,
     )
+    # --raw detalla solo CamDetector; las librerías (matplotlib, ultralytics)
+    # siguen en INFO.
+    log.setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
 def load_verifier(args, hosts: list[str], username: str, password: str, viewer=None,
