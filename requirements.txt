@@ -6,3 +6,5 @@ numpy>=1.26,<3
 # Asignación óptima (algoritmo húngaro) del seguimiento; no confiar en que
 # llegue como dependencia de ultralytics (versiones nuevas no la incluyen).
 scipy>=1.10,<2
+# Registro de rendimiento del equipo y del proceso de CamDetector.
+psutil>=5.9,<8

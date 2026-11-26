@@ -341,6 +341,55 @@ archivo refleja los datos guardados al generarlo, no un registro continuo de
 presencia. La opción `--zona` permite otra zona IANA y `--carpeta` otra salida.
 En Windows, si falta la base de zonas horarias, instalar el paquete `tzdata`.
 
+## Registro diario del rendimiento de la Raspberry
+
+Instalar desde la Raspberry, con el usuario habitual y desde el proyecto:
+
+```bash
+bash tools/instalar_monitor_raspberry.sh
+```
+
+Instala únicamente `psutil` y el servicio independiente `camdetector-monitor`.
+No reinstala PyTorch ni modifica o reinicia la cámara o el resumen de personas.
+Se puede volver a ejecutar para actualizar el monitor; arranca con el equipo.
+
+- Cada 10 segundos escribe una muestra en `logs/rendimiento/AAAA-MM-DD.csv`.
+- Cada 5 minutos actualiza `logs/rendimiento/AAAA-MM-DD.log` con última lectura,
+  media de muestras, mínimos, máximos y la hora de cada extremo. También lo
+  guarda al cambiar el día y al detenerse normalmente.
+- Las fechas usan `America/Lima`. Al reiniciar, reconstruye las estadísticas
+  del día desde el CSV; conserva los archivos de días anteriores.
+
+Mide CPU total, núcleo más ocupado, RAM utilizada y disponible, swap,
+temperatura SoC/CPU, frecuencia, carga a 1/5/15 minutos, disco libre y usado,
+tiempo desde el arranque, CPU y RAM residente del proceso principal de
+CamDetector. RAM utilizada = total menos disponible. Tanto CPU total como
+CPU de CamDetector se normalizan: 100 % equivale a toda la capacidad del equipo.
+
+Los picos son **observados**: CPU es la media del intervalo entre muestras;
+temperatura y RAM son lecturas puntuales. No permite reconstruir picos
+anteriores a instalarlo ni garantiza captar eventos más cortos que el muestreo.
+No es una prueba de estrés ni mide tiempos de inferencia de YOLO.
+
+`vcgencmd get_throttled` aporta avisos de bajo voltaje, frecuencia limitada,
+throttling y límite térmico suave. El resumen separa los bits activos de los
+históricos: estos últimos son desde el arranque, no necesariamente del día.
+Si no hay permiso, utilidad o sensor, registra `n/d` en vez de inventar un cero.
+Referencia: [utilidades oficiales de Raspberry Pi](https://www.raspberrypi.com/documentation/computers/os.html#vcgencmd).
+
+```bash
+systemctl status camdetector-monitor --no-pager
+journalctl -u camdetector-monitor -n 20 --no-pager
+cat "logs/rendimiento/$(TZ=America/Lima date +%F).log"
+tail -n 5 "logs/rendimiento/$(TZ=America/Lima date +%F).csv"
+```
+
+Para una lectura manual (con el servicio del monitor detenido), usar
+`.venv/bin/python tools/monitor_raspberry.py --una-vez`. Las opciones
+`--intervalo`, `--resumen-cada`, `--zona`, `--carpeta` y `--servicio`
+permiten ajustar el muestreo, la salida y el proceso observado. En Linux,
+un bloqueo impide dos escritores simultáneos sobre la misma carpeta.
+
 ## Hallazgos sobre la Vatilon W51-TY (firmware V1.15.29)
 
 - Declara dos temas: `UserAlarm/IVA/HumanShapeDetect` y
