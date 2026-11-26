@@ -1,0 +1,4 @@
+# Los scripts de Linux deben tener fin de línea LF aunque se editen o
+# copien desde Windows (con CRLF bash falla: "bad interpreter").
+*.sh       text eol=lf
+*.service  text eol=lf

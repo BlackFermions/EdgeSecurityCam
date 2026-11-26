@@ -1,0 +1,33 @@
+# Servicio systemd de CamDetector. instalar.sh --servicio lo copia a
+# /etc/systemd/system/ sustituyendo @USUARIO@, @RAIZ@ y @CAMARA@.
+#
+#   sudo systemctl status camdetector      # estado
+#   sudo systemctl restart camdetector     # reiniciar (p. ej. tras editar config)
+#   sudo systemctl stop camdetector        # detener
+#   tail -f @RAIZ@/logs/camdetector.log    # registro
+
+[Unit]
+Description=CamDetector (alarmas de la cámara verificadas con YOLO)
+Wants=network-online.target
+After=network-online.target
+# Reintentar siempre: la cámara o la red pueden tardar en volver.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USUARIO@
+WorkingDirectory=@RAIZ@
+Environment=CAMDETECTOR_CAMARA=@CAMARA@
+ExecStart=/bin/bash @RAIZ@/raspberry/ejecutar.sh
+Restart=always
+RestartSec=10
+# Ctrl+C en lugar de SIGTERM: CamDetector cierra las sesiones y la base en orden.
+KillSignal=SIGINT
+TimeoutStopSec=30
+# El registro ya va a logs/camdetector.log (rotativo); al journal solo los
+# errores graves (p. ej. un fallo al arrancar): journalctl -u camdetector
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
