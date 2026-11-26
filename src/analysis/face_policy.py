@@ -1,0 +1,115 @@
+"""Cuándo intentar reconocer a una persona y cómo decidir quién es.
+
+Principio: reconocer UNA VEZ por trayectoria. El tracker ya sabe que la
+persona del código ...-1 es la misma de hace 5 minutos; basta con ponerle
+nombre una vez y volver a mirar solo ante duda.
+
+Estados de cada persona seguida:
+
+    pendiente ──(votos con el mismo nombre)──► identificada
+        └────(intentos con cara válida sin coincidencia)──► desconocida
+
+- Un intento "válido" es el que llegó a compararse con la galería. Los que
+  no tienen cara, la tienen de mala calidad o encuentran dos caras en la
+  franja (caja unida) no cuentan: solo esperan el siguiente turno.
+- Identificada o desconocida, se vuelve a verificar cada
+  ``reverificar_cada_s`` o de inmediato si la trayectoria se recuperó tras
+  perderse (pudo cambiar de persona).
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass, field
+
+PENDING, IDENTIFIED, UNKNOWN = "pendiente", "identificada", "desconocida"
+
+
+@dataclass
+class FaceState:
+    status: str = PENDING
+    name: str | None = None
+    score: float = 0.0
+    votes: Counter = field(default_factory=Counter)
+    best_scores: dict = field(default_factory=dict)
+    valid_attempts: int = 0
+    attempts: int = 0
+    last_attempt: float = float("-inf")
+    decided_at: float | None = None
+    requested: bool = False
+    recheck: bool = False            # forzar verificación (reaparición, cruce)
+    misses_in_row: int = 0           # intentos seguidos sin cara utilizable
+    max_valid_score: float = 0.0     # mejor similitud en intentos válidos (a quien sea)
+
+
+def current_wait(state: FaceState, params: dict) -> float:
+    """Espera antes del siguiente intento: se duplica con cada intento sin cara
+    utilizable (persona de espaldas o mirando abajo), hasta ``espera_max_s``."""
+    return min(params["espera_entre_intentos_s"] * 2 ** state.misses_in_row,
+               params["espera_max_s"])
+
+
+def should_attempt(state: FaceState, now: float, person_height_px: float,
+                   params: dict) -> bool:
+    if state.requested or person_height_px < params["persona_min_alto_px"]:
+        return False
+    if state.recheck:
+        # Reapareció tras perderse: un intento inmediato, sin la espera
+        # acumulada. La marca se consume aquí; si no hay cara, la espera vuelve
+        # a crecer (2026-10-13: la marca solo se borraba con un intento válido
+        # y reiniciaba la espera en cada turno de una persona sin cara).
+        state.recheck = False
+        state.misses_in_row = 0
+        return now - state.last_attempt >= params["espera_entre_intentos_s"]
+    if now - state.last_attempt < current_wait(state, params):
+        return False
+    if state.status == PENDING:
+        return True
+    return (state.decided_at is not None
+            and now - state.decided_at >= params["reverificar_cada_s"])
+
+
+def register_attempt(state: FaceState, attempt, now: float, params: dict
+                     ) -> tuple[str, str | None, float] | None:
+    """Aplica el resultado de un intento. Devuelve un evento si cambió algo:
+    ("identificada", nombre, similitud) o ("desconocida", None, mejor similitud).
+    """
+    state.requested = False
+    state.attempts += 1
+    state.last_attempt = now
+    if not attempt.counts:
+        state.misses_in_row += 1
+        return None
+    state.misses_in_row = 0
+    state.valid_attempts += 1
+    match = attempt.match
+    state.max_valid_score = max(state.max_valid_score, match.score)
+    if match.name is not None:
+        state.votes[match.name] += 1
+        state.best_scores[match.name] = max(state.best_scores.get(match.name, 0.0), match.score)
+        # Una coincidencia muy segura identifica sola; si no, hacen falta votos.
+        if (state.votes[match.name] >= params["votos"]
+                or match.score >= params["umbral_seguro"]):
+            changed = state.status != IDENTIFIED or state.name != match.name
+            state.status, state.name = IDENTIFIED, match.name
+            state.score = state.best_scores[match.name]
+            state.decided_at = now
+            state.votes.clear()
+            if changed:
+                return (IDENTIFIED, match.name, state.score)
+        return None
+    # Desconocida solo si NINGÚN intento alcanzó el umbral. Si alguno lo hizo
+    # (un candidato), se sigue intentando hasta el doble antes de rendirse:
+    # caras cortadas o inclinadas bajan la similitud de una persona conocida
+    # (2026-10-13: Brayan 0,70 una vez y 0,26–0,34 con la cara cortada).
+    candidate = state.max_valid_score >= params["umbral"]
+    limit = params["intentos_max"] * (2 if candidate else 1)
+    if state.status == PENDING and state.valid_attempts >= limit:
+        state.status, state.decided_at = UNKNOWN, now
+        state.score = max([match.score, *state.best_scores.values()])
+        return (UNKNOWN, None, state.score)
+    if state.status != PENDING:
+        # Verificación sin coincidencia: se mantiene la decisión anterior y se
+        # programa la siguiente verificación.
+        state.decided_at = now
+    return None

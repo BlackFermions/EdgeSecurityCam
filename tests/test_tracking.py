@@ -209,6 +209,25 @@ class TrackManagerTests(unittest.TestCase):
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0].reason, REASON_MOTION)
 
+    def test_contained_box_of_same_height_is_a_duplicate(self):
+        # 2026-10-13 12:40: "Persona 3" fantasma mientras Pablo se movía.
+        self.apply([(100, 50, 200, 300)], 0.0)
+        created, _ = self.apply([(100, 50, 200, 300), (110, 60, 195, 290)], 1.0)
+        self.assertEqual(created, [])
+
+    def test_short_person_inside_is_not_a_duplicate(self):
+        # Un niño delante de un adulto: caja contenida pero mucho más baja.
+        self.apply([(100, 50, 300, 350)], 0.0)
+        created, _ = self.apply([(100, 50, 300, 350), (150, 200, 230, 340)], 1.0)
+        self.assertEqual(len(created), 1)
+
+    def test_weak_detections_hold_a_track_only_for_a_while(self):
+        self.apply([(0, 0, 100, 200)], 0.0)
+        for now in (2.0, 4.0, 6.0, 8.0):                   # solo débiles (p. ej. una silla)
+            self.manager.apply_detections(None, [], [], now, WALL, REASON_INTERVAL, None,
+                                          [(0, 0, 100, 200)], [0.2])
+        self.assertEqual(self.manager.tracks, [])           # pasó a gracia
+
     def test_helpers(self):
         self.assertEqual(camera_alias("192.168.100.109"), "cam109")
         self.assertEqual(camera_alias("entrada"), "entrada")

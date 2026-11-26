@@ -28,5 +28,8 @@ class FrameResult:
 
 
 class PersonDetector(Protocol):
-    def detect(self, frame: np.ndarray) -> FrameResult:
-        """Personas en el fotograma: fuertes (cuentan) y débiles (solo mantienen)."""
+    def detect(self, frame: np.ndarray, *, confidence: float | None = None,
+               weak_confidence: float | None = None,
+               image_size: int | None = None) -> FrameResult:
+        """Personas en el fotograma: fuertes (cuentan) y débiles (solo mantienen).
+        Los argumentos opcionales sustituyen los valores del detector."""

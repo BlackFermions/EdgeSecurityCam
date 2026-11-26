@@ -52,8 +52,11 @@ def draw_overlay(frame: np.ndarray, tracks, reason: str | None, motion_outside: 
             color, source = GRAY, "saliendo"
         x1, y1, x2, y2 = (int(v) for v in track.box)
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 1 if track.exit_kind else 2)
-        _label(image, f"{track.code.rsplit('-', 2)[-2]}-{track.code.rsplit('-', 1)[-1]}"
-                      f" {track.confidence:.2f} {source}", (x1, max(16, y1)), color, 0.45)
+        who = track.identity or track.label or track.code.rsplit("-", 2)[-2]
+        status = getattr(track, "face_status", None)
+        tag = {"identificada": "", "desconocida": " ?"}.get(status, " ...") if status else ""
+        _label(image, f"{who}{tag} {track.confidence:.2f} {source}", (x1, max(16, y1)),
+               color, 0.45)
 
     height, width = image.shape[:2]
     cv2.rectangle(image, (0, 0), (width, 24), (0, 0, 0), -1)

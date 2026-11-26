@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
+
+import cv2
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from src.sources.camera_events import (
     OnvifEventClient,
 )
 from src.sources.camera_web import CameraWeb
+from src.settings import CameraSettings
 from src.storage import NodeStore
 
 
@@ -33,12 +36,15 @@ def describe_people(summary) -> str:
 
 class CamDetectorNode:
     def __init__(self, hosts: list[str], username: str, password: str,
-                 store: NodeStore | None, motion_mode: str = "auto",
-                 verifier=None, ia: dict[str, Any] | None = None,
-                 config_interval: float = 60.0, base_dir: Path | None = None,
-                 idle_sources: dict | None = None, idle_interval: float = 10.0,
-                 idle_min_confidence: float = 0.50) -> None:
+                 store: NodeStore | None, verifier=None,
+                 settings: dict[str, CameraSettings] | None = None,
+                 model_name: str | None = None, base_dir: Path | None = None,
+                 idle_sources: dict | None = None) -> None:
         self.hosts = hosts
+        # Parámetros efectivos por cámara (config/camdetector.toml + línea de
+        # comandos). Se guardan con cada versión de configuración de la cámara.
+        self.settings = {host: (settings or {}).get(host) or CameraSettings(host)
+                         for host in hosts}
         self.store = store
         self.verifier = verifier
         self.base_dir = base_dir
@@ -50,31 +56,47 @@ class CamDetectorNode:
         # La cámara reenvía el mismo estado varias veces por segundo; en el
         # registro detallado solo se muestran los cambios de valor.
         self._raw_last: dict[tuple[str, str], tuple[bool | None, int]] = {}
-        self.clients = {host: OnvifEventClient(host, username, password,
-                                               motion_mode=motion_mode)
+        self.clients = {host: OnvifEventClient(
+                            host, username, password,
+                            motion_mode=self.settings[host].get("camara", "modo_movimiento"))
                         for host in hosts}
-        self.watchers = {host: ConfigWatcher(host, CameraWeb(host, username, password),
-                                             {"ia": ia or {}}, self._on_config,
-                                             self._on_config_error, config_interval,
-                                             self._on_config_recovered)
+
+        def recorded(host: str) -> dict[str, Any]:
+            return {"modelo": model_name if verifier is not None else None,
+                    "camara_nombre": self.settings[host].name,
+                    "parametros": self.settings[host].as_dict()}
+
+        self.watchers = {host: ConfigWatcher(
+                             host, CameraWeb(host, username, password),
+                             {"ia": recorded(host)}, self._on_config,
+                             self._on_config_error,
+                             self.settings[host].get("camara", "config_cada_s"),
+                             self._on_config_recovered)
                          for host in hosts}
         self.listeners = [CameraEventListener(self.clients[host], self._on_alarm,
                                               self._status_handler(host))
                           for host in hosts]
         if verifier is not None:
             verifier.set_callbacks(self._on_verdict, self._on_verification_finished,
-                                   self._on_track, self._on_session)
+                                   self._on_track, self._on_session, self._on_face_attempt)
         # Verificación en reposo: solo con YOLO disponible y una fuente de
         # fotogramas por cámara.
         self.idle_checkers = []
-        if verifier is not None and idle_sources and idle_interval > 0:
+        if verifier is not None and idle_sources:
             from src.analysis.idle import IdleChecker
-            self.idle_checkers = [
-                IdleChecker(host, idle_sources[host], verifier.detector,
-                            verifier.has_session, self._on_idle_person,
-                            self._on_idle_status, interval=idle_interval,
-                            min_confidence=idle_min_confidence)
-                for host in hosts if host in idle_sources]
+            for host in hosts:
+                idle = self.settings[host].section("reposo")
+                if host not in idle_sources or not idle["cada_s"]:
+                    continue
+                yolo = self.settings[host].section("yolo")
+                self.idle_checkers.append(IdleChecker(
+                    host, idle_sources[host], verifier.detector, verifier.has_session,
+                    self._on_idle_person, self._on_idle_status,
+                    interval=idle["cada_s"], cooldown=idle["espera_s"],
+                    min_confidence=idle["confianza_min"],
+                    detect_options={"image_size": yolo["tamano"],
+                                    "confidence": yolo["confianza"],
+                                    "weak_confidence": yolo["confianza_debil"]}))
 
     # --- ciclo de vida ----------------------------------------------------
 
@@ -89,9 +111,14 @@ class CamDetectorNode:
             listener.start()
         for checker in self.idle_checkers:
             checker.start()
-        if self.idle_checkers:
-            log.info("Verificación en reposo: 1 fotograma cada %.0f s si la cámara no avisa.",
-                     self.idle_checkers[0].interval)
+        if self.base_dir is not None and any(
+                s.get("rostro", "activo") for s in self.settings.values()):
+            self._purge_thread = threading.Thread(target=self._purge_loop,
+                                                  name="retencion", daemon=True)
+            self._purge_thread.start()
+        for checker in self.idle_checkers:
+            log.info("[%s] verificación en reposo: 1 fotograma cada %.0f s si la cámara "
+                     "no avisa.", checker.camera, checker.interval)
         log.info("Escuchando %d cámara(s). Ctrl+C para salir.", len(self.hosts))
 
     def close(self) -> None:
@@ -286,6 +313,20 @@ class CamDetectorNode:
     # --- seguimiento corporal --------------------------------------------------
 
     def _on_track(self, event: str, track, note: str | None) -> None:
+        if event == "identified":
+            log.info("[%s]     persona %s = %s (similitud %.2f · %d intento(s) de rostro)",
+                     track.camera, track.code, track.identity, track.face_score,
+                     track.face_attempts)
+            if self.store is not None:
+                self.store.track_face(track)
+            return
+        if event == "unknown":
+            log.info("[%s]     persona %s = %s · DESCONOCIDA (no está en la galería; mejor "
+                     "similitud %.2f en %d intento(s))", track.camera, track.code,
+                     track.label or track.code, track.face_score, track.face_attempts)
+            if self.store is not None:
+                self.store.track_face(track)
+            return
         if event == "recovered":
             how, unseen = (note or "posicion:0").split(":")
             log.info("[%s]     persona %s reapareció tras %s s sin verse (por %s)",
@@ -294,8 +335,9 @@ class CamDetectorNode:
                 self.store.track_recovered(track)
             return
         if event == "entered":
-            log.info("[%s]     persona %s entró (confianza %.2f · YOLO por %s)",
-                     track.camera, track.code, track.confidence, track.reason)
+            log.info("[%s]     persona %s entró%s (confianza %.2f · YOLO por %s)",
+                     track.camera, track.code, f" como {track.label}" if track.label else "",
+                     track.confidence, track.reason)
             if self.store is not None:
                 self.store.track_entered(track)
             return
@@ -308,11 +350,52 @@ class CamDetectorNode:
             description = f"dejó de seguirse: {note}"
         else:
             note = description
-        log.info("[%s]     persona %s %s (%.1f s visible · %d detecciones YOLO)",
-                 track.camera, track.code, description, track.visible_seconds,
+        who = f" ({track.identity or track.label})" if (track.identity or track.label) else ""
+        log.info("[%s]     persona %s%s %s (%.1f s visible · %d detecciones YOLO)",
+                 track.camera, track.code, who, description, track.visible_seconds,
                  track.yolo_hits)
         if self.store is not None:
             self.store.track_left(track, note)
+            if track.face_attempts:
+                self.store.track_face(track)
+
+    def _purge_loop(self) -> None:
+        """Borra al arrancar y cada hora los recortes de rostro vencidos."""
+        from src.outputs.retention import purge_old_days
+        days = min(s.get("rostro", "recortes_dias") for s in self.settings.values()
+                   if s.get("rostro", "activo"))
+        folder = self.base_dir / "capturas" / "rostros"
+        stop = threading.Event()
+        while not self._closing:
+            removed = purge_old_days(folder, days)
+            if removed:
+                log.info("Retención de rostros: borrados los recortes de %s (más de %d días).",
+                         ", ".join(removed), days)
+                self._system_event(None, "retencion",
+                                   f"recortes borrados: {', '.join(removed)}")
+            stop.wait(3600)
+
+    def _on_face_attempt(self, track, attempt, hd_ms: float) -> None:
+        match = attempt.match
+        detail = (f"{match.best} {match.score:.2f} / {match.second} {match.second_score:.2f}"
+                  if match else ", ".join(attempt.problems) or f"{attempt.faces_in_band} cara(s)")
+        log.debug("[%s]       rostro %s: %s (%s) · HD %.0f ms · rostro %.0f ms",
+                  track.camera, track.code, attempt.result, detail, hd_ms, attempt.elapsed_ms)
+        crop = None
+        settings = self.settings.get(track.camera)
+        if (attempt.crop is not None and self.base_dir is not None and settings is not None
+                and settings.get("rostro", "guardar_recortes")):
+            now = datetime.now()
+            folder = self.base_dir / "capturas" / "rostros" / now.strftime("%Y-%m-%d")
+            name = f"{now:%H%M%S_%f}_{track.code}_{attempt.result}.jpg"
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                if cv2.imwrite(str(folder / name), attempt.crop):
+                    crop = self._relative(folder / name)
+            except (OSError, cv2.error):
+                crop = None
+        if self.store is not None:
+            self.store.face_attempt(track, attempt, hd_ms, crop)
 
     def _on_session(self, stats) -> None:
         reasons = ", ".join(f"{name} {count}" for name, count in stats.reasons.most_common())
@@ -326,6 +409,11 @@ class CamDetectorNode:
         log.info("[%s]     eficiencia: %d fotogramas · %d YOLO (%.0f%% sin YOLO) · "
                  "motivos: %s", stats.camera, stats.frames, stats.yolo_runs,
                  stats.savings * 100, reasons or "-")
+        if getattr(stats, "face_attempts", 0) or getattr(stats, "face_grabs", 0):
+            log.info("[%s]     rostro: %d ráfaga(s) HD · %d intento(s) · %d comparado(s) con "
+                     "la galería · %d identificada(s) · %d desconocida(s)", stats.camera,
+                     stats.face_grabs, stats.face_attempts, stats.face_compared,
+                     stats.identified, stats.unknown)
         if self.store is not None:
             self.store.session_finished(stats)
 

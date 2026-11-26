@@ -7,7 +7,7 @@ if not errorlevel 1 goto usar_py
 
 where python >nul 2>nul
 if errorlevel 1 (
-    echo No se encontro Python. Instala Python 3.10 o superior y vuelve a ejecutar este archivo.
+    echo No se encontro Python. Instala Python 3.11 o superior y vuelve a ejecutar este archivo.
     pause
     exit /b 1
 )
@@ -33,6 +33,11 @@ if errorlevel 1 (
     exit /b 1
 )
 popd
+
+if not exist config\camdetector.toml (
+    copy config\camdetector.example.toml config\camdetector.toml >nul
+    echo Se creo config\camdetector.toml: parametros por camara ^(ver docs\parametros.md^).
+)
 
 if not exist claves.txt (
     copy claves.example.txt claves.txt >nul

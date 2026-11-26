@@ -1,0 +1,12 @@
+# Dependencias de CamDetector en Raspberry Pi / Linux: las mismas que en
+# Windows más los motores para ejecutar YOLO exportado (más rápido en ARM).
+# instalar.sh instala primero ../requirements.txt (obligatorio) y después
+# cada línea de este archivo por separado: si una falla, avisa y sigue.
+
+# Ejecutar YOLO exportado (src/detection/yolo.py)
+onnxruntime>=1.20,<2
+ncnn>=1.0.20250503
+# Solo para exportar (tools/exportar_yolo.py)
+onnx>=1.12,<2
+onnxslim>=0.1.71
+pnnx>=20250530

@@ -1,5 +1,6 @@
 # Credenciales y datos locales del nodo
 claves.txt
+config/camdetector.toml
 data/
 logs/
 capturas/
@@ -7,8 +8,14 @@ capturas/
 
 # Modelos (se descargan en la instalación)
 models/*.pt
+models/*_ncnn_model/
 
 # Python
 .venv/
 __pycache__/
 *.pyc
+models/*.onnx
+models/*.part
+
+# Galería de rostros (datos personales: nunca se versiona)
+face_gallery/

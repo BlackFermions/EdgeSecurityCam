@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS config_camara (
@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS persona_track (
     motivo_deteccion    TEXT,                   -- qué despertó a YOLO al aparecer
     recuperaciones      INTEGER DEFAULT 0,      -- reapariciones tras dejar de verse
     recuperaciones_apariencia INTEGER DEFAULT 0, -- de ellas, por color de la ropa
+    etiqueta            TEXT,                   -- "Persona N" (numeración diaria)
+    identidad           TEXT,                   -- nombre de la galería si se reconoció
+    similitud_rostro    REAL,
+    estado_rostro       TEXT,                   -- pendiente / identificada / desconocida
+    intentos_rostro     INTEGER DEFAULT 0,
     nota                TEXT,
     actualizado         TEXT NOT NULL,
     enviado             TEXT
@@ -102,6 +107,32 @@ CREATE TABLE IF NOT EXISTS sesion_analisis (
     error               TEXT,
     enviado             TEXT
 );
+
+-- Versión 4: reconocimiento facial. Un registro por intento: es la
+-- materia prima para calibrar umbral, tamaño de cara, frontalidad, etc.
+CREATE TABLE IF NOT EXISTS rostro_intento (
+    id                  INTEGER PRIMARY KEY,
+    persona_id          TEXT NOT NULL,
+    camara              TEXT NOT NULL,
+    momento             TEXT NOT NULL,
+    resultado           TEXT NOT NULL,   -- coincide / bajo_umbral / ambiguo / sin_cara / calidad / union
+    problemas           TEXT,            -- pequeña, de perfil, borrosa, oscura
+    caras_franja        INTEGER,
+    cara_px             REAL,
+    frontal             REAL,
+    nitidez             REAL,
+    brillo              REAL,
+    mejor               TEXT,
+    similitud           REAL,
+    segundo             TEXT,
+    similitud_segundo   REAL,
+    estado_tras_intento TEXT,
+    recorte             TEXT,            -- capturas/rostros/... (para etiquetar)
+    ms_hd               REAL,            -- abrir el vídeo HD y obtener el fotograma
+    ms_rostro           REAL,            -- YuNet + calidad + SFace + galería
+    enviado             TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_rostro_persona ON rostro_intento(persona_id);
 
 CREATE TABLE IF NOT EXISTS evento_sistema (
     id       INTEGER PRIMARY KEY,
@@ -146,7 +177,9 @@ class NodeStore:
         """Añade a bases anteriores las columnas que CREATE TABLE no agrega."""
         added = {
             "persona_track": ("recuperaciones INTEGER DEFAULT 0",
-                              "recuperaciones_apariencia INTEGER DEFAULT 0"),
+                              "recuperaciones_apariencia INTEGER DEFAULT 0",
+                              "etiqueta TEXT", "identidad TEXT", "similitud_rostro REAL",
+                              "estado_rostro TEXT", "intentos_rostro INTEGER DEFAULT 0"),
             "sesion_analisis": ("reapariciones TEXT",),
         }
         for table, columns in added.items():
@@ -264,12 +297,42 @@ class NodeStore:
             self._db.execute(
                 """INSERT INTO persona_track (id, codigo, camara, alarma_id, sesion_id,
                        entrada, ultima_vista, max_confianza, detecciones_yolo,
-                       motivo_deteccion, actualizado)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                       motivo_deteccion, etiqueta, actualizado)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (track.id, track.code, track.camera, track.alarm_id, track.session_id,
                  utc_iso(track.started_wall), utc_iso(track.last_seen_wall),
                  round(track.max_confidence, 4), track.yolo_hits, track.reason,
-                 utc_iso()))
+                 track.label, utc_iso()))
+
+    def track_face(self, track) -> None:
+        with self._lock:
+            self._db.execute(
+                """UPDATE persona_track SET etiqueta=?, identidad=?, similitud_rostro=?,
+                       estado_rostro=?, intentos_rostro=?, actualizado=?, enviado=NULL
+                   WHERE id=?""",
+                (track.label, track.identity, round(track.face_score, 4),
+                 track.face_status, track.face_attempts, utc_iso(), track.id))
+
+    def face_attempt(self, track, attempt, hd_ms: float, crop: str | None) -> None:
+        quality, match = attempt.quality, attempt.match
+        with self._lock:
+            self._db.execute(
+                """INSERT INTO rostro_intento (persona_id, camara, momento, resultado,
+                       problemas, caras_franja, cara_px, frontal, nitidez, brillo, mejor,
+                       similitud, segundo, similitud_segundo, estado_tras_intento,
+                       recorte, ms_hd, ms_rostro)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (track.id, track.camera, utc_iso(), attempt.result,
+                 ", ".join(attempt.problems) or None, attempt.faces_in_band,
+                 quality.size_px if quality else None,
+                 round(quality.frontal, 3) if quality else None,
+                 round(quality.sharpness, 1) if quality else None,
+                 round(quality.brightness, 1) if quality else None,
+                 match.best if match else None,
+                 round(match.score, 4) if match else None,
+                 match.second if match else None,
+                 round(match.second_score, 4) if match else None,
+                 track.face_status, crop, round(hd_ms, 1), round(attempt.elapsed_ms, 1)))
 
     def track_recovered(self, track) -> None:
         with self._lock:

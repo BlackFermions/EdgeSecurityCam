@@ -27,7 +27,8 @@ class IdleChecker(threading.Thread):
                  on_person: Callable[[str, object], None],
                  on_status: Callable[[str, str], None] = lambda *_: None,
                  interval: float = 10.0, cooldown: float = 60.0,
-                 min_confidence: float = 0.50) -> None:
+                 min_confidence: float = 0.50,
+                 detect_options: dict | None = None) -> None:
         super().__init__(name=f"reposo-{camera}", daemon=True)
         self.camera = camera
         self._source = source
@@ -38,6 +39,7 @@ class IdleChecker(threading.Thread):
         self.interval = interval
         self.cooldown = cooldown
         self.min_confidence = min_confidence
+        self._detect_options = detect_options or {}
         self._halt = threading.Event()
         self._cooldown_until = 0.0
         self._failing_since: float | None = None
@@ -61,7 +63,7 @@ class IdleChecker(threading.Thread):
                                          f"{now - self._failing_since:.0f} s")
             self._failing_since = None
         self.checks += 1
-        result = self._detector.detect(frame)
+        result = self._detector.detect(frame, **self._detect_options)
         if not any(confidence >= self.min_confidence for confidence in result.confidences):
             return False
         if self._is_busy(self.camera):            # llegó una alarma mientras tanto

@@ -28,7 +28,8 @@ class FakeVerifier:
     def __init__(self):
         self.started, self.ended = [], []
 
-    def set_callbacks(self, on_verdict, on_finished, on_track=None, on_session=None):
+    def set_callbacks(self, on_verdict, on_finished, on_track=None, on_session=None,
+                      on_face_attempt=None):
         self.on_verdict, self.on_finished = on_verdict, on_finished
         self.on_track, self.on_session = on_track, on_session
 
