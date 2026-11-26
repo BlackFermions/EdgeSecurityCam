@@ -299,6 +299,48 @@ Plan, mediciones y decisiones: [docs/plan_rostro.md](docs/plan_rostro.md).
   sale y vuelve a entrar recibe otro código. Unir apariciones es trabajo de
   Re-ID y del reconocimiento facial (siguientes etapas).
 
+## Resumen diario en un archivo
+
+`tools/resumen_diario.py` consulta SQLite en modo de solo lectura y guarda
+`logs/resumen_diario/AAAA-MM-DD.log`, con fechas en `America/Lima`. Incluye
+totales de alarmas, apariciones por nombre reconocido, entrada y salida de
+cada aparición, estado y similitud facial, resultados de los intentos y
+eventos del sistema. Cada aparición cuenta una entrada, no una persona
+distinta; un registro sin salida no demuestra presencia actual.
+
+En la Raspberry, generar el resumen de hoy o de una fecha concreta:
+
+```bash
+.venv/bin/python tools/resumen_diario.py --fecha hoy
+.venv/bin/python tools/resumen_diario.py --fecha 2026-11-26
+```
+
+Para actualizarlo automáticamente cada cinco minutos (ejecutar con el usuario
+habitual, desde la carpeta del proyecto):
+
+```bash
+bash tools/instalar_resumen_diario.sh
+```
+
+El instalador crea `camdetector-resumen.service` y `camdetector-resumen.timer`;
+no modifica el servicio de detección ni necesita reiniciarlo. El temporizador
+arranca con el sistema y regenera hoy y ayer, para recoger identificaciones y
+cierres posteriores a medianoche. Cada archivo se reemplaza de forma atómica:
+las ejecuciones no agregan filas duplicadas. Los archivos anteriores se conservan;
+para regenerar una fecha anterior a ayer, usar `--fecha AAAA-MM-DD`.
+
+```bash
+systemctl list-timers camdetector-resumen.timer --no-pager
+journalctl -u camdetector-resumen.service -n 20 --no-pager
+cat "logs/resumen_diario/$(TZ=America/Lima date +%F).log"
+```
+
+Las filas de personas se asignan al día de su entrada; las alarmas e intentos
+faciales se cuentan por su propia fecha. SQLite sigue siendo la fuente: el
+archivo refleja los datos guardados al generarlo, no un registro continuo de
+presencia. La opción `--zona` permite otra zona IANA y `--carpeta` otra salida.
+En Windows, si falta la base de zonas horarias, instalar el paquete `tzdata`.
+
 ## Hallazgos sobre la Vatilon W51-TY (firmware V1.15.29)
 
 - Declara dos temas: `UserAlarm/IVA/HumanShapeDetect` y
