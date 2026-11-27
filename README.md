@@ -34,12 +34,27 @@ cámara.
 La instalación descarga ~1 GB (PyTorch en CPU). Sin YOLO, la recepción de
 alarmas y la base no necesitan dependencias: `python escuchar_alarmas.py --no-yolo`.
 
+## Instalación en Raspberry Pi / Linux
+
+Mismo código; los archivos propios de Linux (instalador, servicio systemd,
+guía paso a paso) están en [`raspberry/`](raspberry/README.md):
+
+```bash
+bash raspberry/instalar.sh --servicio --camara 192.168.100.109
+```
+
+El registro (`logs/camdetector.log`) rota solo: 10 archivos de 5 MB como máximo.
+
 ## Uso directo
 
 ```powershell
 .\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109
 .\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109 --raw   # cada evento
 .\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109 --no-yolo
+
+# Formato de YOLO: auto (defecto) = ONNX/NCNN si están exportados, si no PyTorch
+.\.venv\Scripts\python tools\exportar_yolo.py --formatos onnx    # exportar y validar
+.\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109 --yolo-formato pt
 
 # Ventana con el vídeo analizado en tiempo real (q o Esc para cerrar)
 .\.venv\Scripts\python escuchar_alarmas.py --camera 192.168.100.109 --ver
@@ -232,11 +247,18 @@ moviéndose sobre la sala vacía (vídeo sintético a 10 fps):
 | **YOLO + flujo óptico + salvaguardas** | **13 de 79 (84% sin YOLO)** | **31% de un núcleo** |
 
 La persona que aparece a mitad del vídeo se detectó ~0,6 s después, por
-`movimiento_nuevo`. La RAM no cambia: la ocupa PyTorch. Exportar el modelo a
-ONNX y quitar PyTorch es la siguiente optimización.
+`movimiento_nuevo`. La RAM no cambia: la ocupa PyTorch.
+
+**YOLO exportado (2026-11-26, mismo PC, 416 px, cámara real):** ONNX da
+detecciones idénticas a PyTorch y gasta ~2,5× menos CPU por inferencia
+(93 frente a 235 ms de CPU). NCNN es fiel a su exportación pero cambia la cabeza de YOLO26.
+Detalle en `docs/calibracion/2026-11-26_yolo_formatos.md`. PyTorch sigue
+cargado (Ultralytics lo usa para preparar la imagen): la RAM no baja.
 
 `escuchar_alarmas.py` define `KMP_BLOCKTIME=0` y `OMP_WAIT_POLICY=PASSIVE`: sin
-ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia.
+ellas los hilos de PyTorch siguen ocupando CPU después de cada inferencia. Lo
+mismo pasa con ONNX Runtime (3 s de CPU en 1 s de esperas): `src/detection/yolo.py`
+desactiva esa espera activa (`allow_spinning = 0`).
 
 ## Reconocimiento facial
 
@@ -467,6 +489,7 @@ dentro sin tocar los demás:
 ```
 escuchar_alarmas.py          punto de entrada (argumentos, registro, arranque)
 instalar.bat / ejecutar.bat  instalación y arranque en Windows
+raspberry/                   instalación y servicio en Raspberry Pi / Linux (ver su README)
 requirements.txt
 claves.example.txt           plantilla de credenciales (claves.txt no se versiona)
 src/node.py                  servicio del nodo: une los módulos
@@ -482,7 +505,7 @@ src/sources/                 1-2 · entradas
     hd.py                      fotograma del vídeo HD en ráfaga
 src/detection/               3 · detector de personas
     base.py                    interfaz PersonDetector y FrameResult
-    yolo.py                    YoloPersonDetector
+    yolo.py                    YoloPersonDetector (PyTorch, ONNX o NCNN)
 src/tracking/                4 · seguimiento clásico
     geometry.py, flow.py, kalman.py, gate.py, assignment.py, manager.py
 src/identity/                5 · identidad corporal
@@ -508,6 +531,8 @@ src/outputs/                 12 · salidas
     viewer.py                  ventana --ver
 tools/resumen.py             resumen de la base para calibrar
 tools/parametros.py          parámetros efectivos por cámara
+tools/exportar_yolo.py       exporta YOLO a ONNX/NCNN y lo valida contra PyTorch
+tools/rendimiento.py         prueba de rendimiento del equipo con la cámara real
 tools/galeria.py             enrolar personas desde la cámara y revisar la galería
 tools/sondear_eventos.py     diagnóstico de la cámara
 config/camdetector.example.toml   plantilla de parámetros por cámara

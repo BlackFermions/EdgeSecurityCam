@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 import threading
@@ -22,6 +23,9 @@ from pathlib import Path
 # (espera activa). Debe definirse antes de importar torch.
 os.environ.setdefault("KMP_BLOCKTIME", "0")
 os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+# Un servicio no debe instalar paquetes por su cuenta (Ultralytics lo intenta
+# si le falta, p. ej., la librería ncnn): se instala con instalar.bat/.sh.
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
 from src.sources.camera_events import MOTION_MODES  # noqa: E402
 from src.credentials import read_credentials  # noqa: E402
@@ -56,7 +60,10 @@ def configure_logging(log_file: Path | None, verbose: bool) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        # Rotativo: en un nodo que corre meses el registro no debe llenar el disco
+        # (10 archivos de 5 MB como máximo).
+        handlers.append(logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=5 * 1024 * 1024, backupCount=9, encoding="utf-8"))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(message)s",
@@ -78,13 +85,18 @@ def load_verifier(args, hosts: list[str], username: str, password: str, viewer=N
     model = args.model
     if not Path(model).exists():
         model = Path(model).name    # ultralytics lo descarga
-    log.info("Cargando YOLO (%s)...", Path(model).name)
+    # Un modelo por tamaño de entrada usado (NCNN tiene el tamaño fijo); el
+    # resto de parámetros va por cámara en cada llamada.
+    sizes = sorted({settings[host].get("yolo", "tamano") for host in hosts})
+    log.info("Cargando YOLO (%s, formato %s, %s px)...", Path(model).name,
+             args.yolo_formato, "/".join(map(str, sizes)))
     try:
-        detector = YoloPersonDetector(model)    # parámetros por cámara en cada llamada
+        detector = YoloPersonDetector(model, model_format=args.yolo_formato, sizes=sizes)
     except Exception as error:      # noqa: BLE001 - se informa y se sigue sin YOLO
         log.error("YOLO no disponible (%s: %s); se registran solo las alarmas.",
                   type(error).__name__, error)
         return None
+    args.model_description = detector.description
     log.info("YOLO listo: verifica cada alarma y sigue a las personas.")
     return AnalysisManager(
         detector, {host: rtsp_url(host, username, password) for host in hosts},
@@ -159,6 +171,9 @@ def main() -> int:
                         help="Solo registra las alarmas, sin verificar con YOLO")
     parser.add_argument("--model", default=str(DEFAULT_MODEL),
                         help="Modelo YOLO (por defecto yolo26n)")
+    parser.add_argument("--yolo-formato", choices=("auto", "pt", "onnx", "ncnn"), default="auto",
+                        help="pt (PyTorch), onnx o ncnn (exportados con tools/exportar_yolo.py) "
+                             "o auto: el exportado si existe para el tamaño (ONNX, luego NCNN), si no PyTorch")
     parser.add_argument("--yolo-confidence", type=float, default=None,
                         help="Confianza mínima de YOLO para contar una persona")
     parser.add_argument("--idle-check-seconds", type=float, default=None,
@@ -238,7 +253,8 @@ def main() -> int:
                         for host in hosts}
 
     node = CamDetectorNode(hosts, username, password, store, verifier=verifier,
-                           settings=settings, model_name=Path(args.model).name,
+                           settings=settings, model_name=getattr(args, "model_description",
+                                                          Path(args.model).name),
                            base_dir=BASE_DIR, idle_sources=idle_sources)
     node.start()
     stop = threading.Event()

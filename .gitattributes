@@ -1,2 +1,2 @@
-tools/instalar_resumen_diario.sh text eol=lf
-tools/instalar_monitor_raspberry.sh text eol=lf
+*.sh text eol=lf
+*.service text eol=lf

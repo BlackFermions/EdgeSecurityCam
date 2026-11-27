@@ -8,6 +8,7 @@ capturas/
 
 # Modelos (se descargan en la instalación)
 models/*.pt
+models/*_ncnn_model/
 
 # Python
 .venv/
